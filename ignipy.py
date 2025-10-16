@@ -13,8 +13,104 @@ except ImportError:
 
 
 class Ignitor():
+    """
+    Represents an ignitor model defining time-dependent combustion properties,
+    including mass flow, specific enthalpy, enthalpy rate, and derived quantities
+    such as cumulative mass and energy release. Supports gas-phase product tracking
+    and thermodynamic integration over time.
 
+    The ignitor may represent a real ignition charge or a modeled energy source,
+    defined by its time-dependent thermodynamic behavior.
+
+    Attributes
+    ----------
+    # --- User-defined on initialization ---
+    name : str
+        Descriptive name of the ignitor.
+    h_curve : np.ndarray
+        Specific enthalpy [J/kg] as a function of time.
+    m_dot_curve : np.ndarray
+        Total mass flow rate [kg/s] as a function of time.
+    t_vector : np.ndarray
+        Time vector [s], aligned with h_curve and m_dot_curve.
+    H_dot_curve : np.ndarray
+        Instantaneous enthalpy flow rate [W] = m_dot * h.
+
+    # --- Defined after combustion setup (via setup_combustion_products) ---
+    total_combustion_moles : float
+        Total moles of combustion products (gas + condensed).
+    total_combustion_mass : float
+        Total mass [kg] of all combustion products (gas + condensed).
+    total_gas_mass : float
+        Total gaseous combustion mass [kg].
+    gas_combustion_products_per_kg : object
+        Mixture object (from `gaspype`) representing the normalized gaseous
+        combustion products per kilogram of total products.
+    gas_mas_ratio : float
+        Ratio of gaseous mass to total combustion mass.
+    gm_dot_curve : np.ndarray
+        Gas-phase mass flow rate [kg/s] as a function of time.
+
+    # --- Derived cumulative quantities (computed via compute_mass_integrals_arrays) ---
+    mass_integral_curve : np.ndarray
+        Cumulative total combusted mass [kg] vs. time.
+    gas_mass_integral_curve : np.ndarray
+        Cumulative released gas mass [kg] vs. time.
+    H_integral_curve : np.ndarray
+        Cumulative enthalpy release [J] vs. time.
+
+    # --- Derived analysis quantities ---
+    get_m_dot(t) : float or np.ndarray
+        Interpolated total mass flow [kg/s] at time t.
+    get_gm_dot(t) : float or np.ndarray
+        Interpolated gas mass flow [kg/s] at time t.
+    get_h(t) : float or np.ndarray
+        Interpolated specific enthalpy [J/kg] at time t.
+    get_H_dot(t) : float or np.ndarray
+        Interpolated enthalpy rate [W] at time t.
+    get_m_integral(t) : float or np.ndarray
+        Interpolated total combusted mass [kg] up to time t.
+    get_gm_integral(t) : float or np.ndarray
+        Interpolated released gas mass [kg] up to time t.
+    get_H_integral(t) : float or np.ndarray
+        Interpolated total enthalpy release [J] up to time t.
+    get_m_interval(t1, t2) : float
+        Total mass combusted [kg] between t1 and t2.
+    get_gm_interval(t1, t2) : float
+        Gas mass released [kg] between t1 and t2.
+    get_H_interval(t1, t2) : float
+        Enthalpy released [J] between t1 and t2.
+    get_fluid_interval(t1, t2) : object
+        Mixture object representing combustion gas released between t1 and t2.
+
+    # --- Visualization ---
+    plot_ignitor_curves()
+        Plots mass flow, specific enthalpy, and power vs. time.
+        If available, also plots cumulative mass release curves.
+
+    Notes
+    -----
+    - The ignitor supports both solid and gaseous combustion components.
+    - Integration is performed using SciPy’s trapezoidal integration (`cumtrapz` or `cumulative_trapezoid`).
+    - Time interpolation uses `numpy.interp` with zero-extrapolation outside the domain.
+    - The class assumes the combustion product object supports scalar multiplication
+      and provides a `.get_mass()` method for normalization.
+    """
     def __init__(self, h_curve, m_dot_curve, t_vector,name="Unconspicuous ignitor"):
+        """
+                Initialize the ignitor with given time-dependent curves.
+
+                Parameters
+                ----------
+                h_curve : np.ndarray
+                    Specific enthalpy [J/kg] vs. time.
+                m_dot_curve : np.ndarray
+                    Mass flow rate [kg/s] vs. time.
+                t_vector : np.ndarray
+                    Time vector [s], same length as h_curve and m_dot_curve.
+                name : str, optional
+                    Descriptive name for this ignitor instance.
+                """
         self.name = name
         self.h_curve = h_curve
         self.m_dot_curve = m_dot_curve
@@ -23,11 +119,23 @@ class Ignitor():
 
     def plot_ignitor_curves(self):
         """
-        Plot the ignitor curves vs time:
-          - top:    mass flow (kg/s)
-          - middle: specific enthalpy (J/kg)
-          - bottom: power / enthalpy generation (W = kg/s * J/kg)
-        Also plots the integrated total and gas mass released over time.
+        Plot the ignitor curves vs. time:
+          - Top:    Mass flow rate (kg/s)
+          - Middle: Specific enthalpy (J/kg)
+          - Bottom: Power (W = kg/s * J/kg)
+
+        If available, also plots the cumulative integrals of:
+          - total combusted mass
+          - released gas mass
+
+        Inputs
+        ------
+        None
+
+        Outputs
+        -------
+        None
+        (Displays matplotlib plots.)
         """
         t = self.t_vector
         m = self.m_dot_curve
@@ -73,8 +181,24 @@ class Ignitor():
     def setup_combustion_products(self, combustion_products, total_combustion_moles, total_combustion_mass,
                                   total_gas_mass):
         """
-        Sets up the combustion product gas mixture normalized per kg of total combustion products.
-        Only the gaseous species are included in combustion_products.
+        Define combustion product properties and compute gas-phase ratios.
+
+        Inputs
+        ------
+        combustion_products : object
+            Gas-phase mixture object representing combustion products.
+            Must implement `get_mass()` and scalar multiplication.
+        total_combustion_moles : float
+            Total moles of products generated per ignition event.
+        total_combustion_mass : float
+            Total mass [kg] of all combustion products (gas + condensed).
+        total_gas_mass : float
+            Total gas-phase mass [kg] of combustion products.
+
+        Outputs
+        -------
+        None
+        (Sets internal attributes and computes gas mass flow curves.)
         """
         self.total_combustion_moles = total_combustion_moles
         self.total_combustion_mass = total_combustion_mass
@@ -98,46 +222,151 @@ class Ignitor():
         print("new mass", self.gas_combustion_products_per_kg.get_mass())
 
     def get_m_dot(self, t):
-        """Return mass flow rate [kg/s] at time t via linear interpolation."""
+        """
+        Return the instantaneous total mass flow rate [kg/s] at a given time.
+
+        Inputs
+        ------
+        t : float or np.ndarray
+            Time(s) [s] at which to evaluate the mass flow.
+
+        Outputs
+        -------
+        m_dot : float or np.ndarray
+            Interpolated mass flow rate [kg/s].
+        """
         return np.interp(t, self.t_vector, self.m_dot_curve, left=0.0, right=0.0)
 
     def get_gm_dot(self, t):
-        """Return gas mass flow rate [kg/s] at time t via linear interpolation."""
+        """
+                Return the instantaneous gas-phase mass flow rate [kg/s] at a given time.
+
+                Inputs
+                ------
+                t : float or np.ndarray
+                    Time(s) [s] at which to evaluate gas mass flow.
+
+                Outputs
+                -------
+                gm_dot : float or np.ndarray
+                    Interpolated gas-phase mass flow rate [kg/s].
+                """
         return np.interp(t, self.t_vector, self.gm_dot_curve, left=0.0, right=0.0)
 
     def get_gm_integral(self, t):
-        """Return gas mass flow rate [kg/s] at time t via linear interpolation."""
+        """
+                Return the cumulative gas mass released [kg] at a given time.
+
+                Inputs
+                ------
+                t : float or np.ndarray
+                    Time(s) [s] at which to evaluate the cumulative gas mass.
+
+                Outputs
+                -------
+                gm_integral : float or np.ndarray
+                    Interpolated cumulative gas mass [kg].
+                """
         return np.interp(t, self.t_vector, self.gas_mass_integral_curve, left=0.0, right=0.0)
+
     def get_m_integral(self, t):
-        """Return gas mass flow rate [kg/s] at time t via linear interpolation."""
+        """
+                Return the cumulative total combusted mass [kg] at a given time.
+
+                Inputs
+                ------
+                t : float or np.ndarray
+                    Time(s) [s] at which to evaluate cumulative mass.
+
+                Outputs
+                -------
+                m_integral : float or np.ndarray
+                    Interpolated cumulative total mass [kg].
+                """
         return np.interp(t, self.t_vector, self.mass_integral_curve, left=0.0, right=0.0)
 
+    def get_H_integral(self, t):
+        """
+                Return the cumulative enthalpy release [J] at a given time.
+
+                Inputs
+                ------
+                t : float or np.ndarray
+                    Time(s) [s] at which to evaluate cumulative enthalpy.
+
+                Outputs
+                -------
+                H_integral : float or np.ndarray
+                    Interpolated cumulative enthalpy [J].
+                """
+        return np.interp(t, self.t_vector, self.H_integral_curve, left=0.0, right=0.0)
+
     def get_h(self, t):
-        """Return specific enthalpy [J/kg] at time t via linear interpolation."""
-        return np.interp(t, self.t_vector, self.h_curve, left=self.h_curve[0], right=self.h_curve[-1])
+        """
+                Return the specific enthalpy [J/kg] at a given time.
+
+                Inputs
+                ------
+                t : float or np.ndarray
+                    Time(s) [s] at which to evaluate the enthalpy.
+
+                Outputs
+                -------
+                h : float or np.ndarray
+                    Interpolated specific enthalpy [J/kg].
+                """
+        return np.interp(t, self.t_vector, self.h_curve, left=self.h_curve[0], right=self.h_curve[-1]   )
 
     def get_H_dot(self, t):
-        """Return enthalpy rate (power) [W] = m_dot * h at time t via linear interpolation."""
+        """
+                Return the instantaneous enthalpy rate (power) [W] = m_dot * h.
+
+                Inputs
+                ------
+                t : float or np.ndarray
+                    Time(s) [s] at which to evaluate power.
+
+                Outputs
+                -------
+                H_dot : float or np.ndarray
+                    Interpolated enthalpy rate [W].
+                """
         return np.interp(t, self.t_vector, self.H_dot_curve, left=0.0, right=0.0)
 
     def compute_mass_integrals_arrays(self):
         """
-        Compute cumulative integrals of:
-          - total combusted mass
-          - released gas mass
-        over time using trapezoidal integration.
+                Compute cumulative integrals of:
+                  - total combusted mass
+                  - released gas mass
+                  - total enthalpy release
 
-        Stores results as arrays aligned with t_vector:
-            self.mass_integral_curve [kg]
-            self.gas_mass_integral_curve [kg]
-        """
+                over time using trapezoidal integration.
+
+                Inputs
+                ------
+                None
+                (Uses existing self.t_vector, self.m_dot_curve, self.H_dot_curve.)
+
+                Outputs
+                -------
+                None
+                (Stores results as arrays aligned with self.t_vector:)
+                    self.mass_integral_curve [kg]
+                    self.gas_mass_integral_curve [kg]
+                    self.H_integral_curve [J]
+                """
         t = self.t_vector
         m_dot = self.m_dot_curve
         gm_dot = getattr(self, "gm_dot_curve", None)
+        H_dot = self.H_dot_curve
 
         # Integrate mass flow curves with respect to time
         self.mass_integral_curve = np.concatenate(
             ([0.0], cumtrapz(m_dot, t))
+        )
+
+        self.H_integral_curve = np.concatenate(
+            ([0.0], cumtrapz(H_dot, t))
         )
 
         if gm_dot is not None:
@@ -149,6 +378,81 @@ class Ignitor():
 
         print("Total mass combusted:", self.mass_integral_curve[-1], "kg")
         print("Total gas mass released:", self.gas_mass_integral_curve[-1], "kg")
+
+    def get_H_interval(self, t1, t2):
+        """
+                Return total enthalpy released [J] between two times.
+
+                Inputs
+                ------
+                t1 : float
+                    Start time [s].
+                t2 : float
+                    End time [s].
+
+                Outputs
+                -------
+                delta_H : float
+                    Enthalpy released [J] between t1 and t2.
+                """
+        return self.get_H_integral(t2) - self.get_H_integral(t1)
+    def get_m_interval(self, t1, t2):
+        """
+                Return total mass combusted [kg] between two times.
+
+                Inputs
+                ------
+                t1 : float
+                    Start time [s].
+                t2 : float
+                    End time [s].
+
+                Outputs
+                -------
+                delta_H : float
+                    Mass combusted [kg] between t1 and t2.
+                """
+        return self.get_m_integral(t2) - self.get_m_integral(t1)
+    def get_gm_interval(self, t1, t2):
+        """
+                Return total gas mass released [kg] between two times.
+
+                Inputs
+                ------
+                t1 : float
+                    Start time [s].
+                t2 : float
+                    End time [s].
+
+                Outputs
+                -------
+                delta_gm : float
+                    Gas mass released [kg] between t1 and t2.
+                """
+        return self.get_gm_integral(t2) - self.get_gm_integral(t1)
+
+
+    def get_fluid_interval(self, t1, t2):
+        """
+                Return the equivalent gas mixture (combustion products) for the
+                enthalpy released between two time points.
+
+                Inputs
+                ------
+                t1 : float
+                    Start time [s].
+                t2 : float
+                    End time [s].
+
+                Outputs
+                -------
+                fluid : object
+                    Scaled combustion product mixture corresponding to mass
+                    released between t1 and t2.
+                """
+        return self.gas_combustion_products_per_kg*self.get_m_interval(t1, t2)
+
+
 
 
 # Testing code for the Ignitor class:
