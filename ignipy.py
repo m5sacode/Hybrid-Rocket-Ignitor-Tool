@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pulse_generators as pg
 import gaspype as gp
+from scipy.optimize import brentq
+
+
 try:
     # SciPy ≥1.14
     from scipy.integrate import cumulative_trapezoid as cumtrapz
@@ -96,7 +99,7 @@ class Ignitor():
     - The class assumes the combustion product object supports scalar multiplication
       and provides a `.get_mass()` method for normalization.
     """
-    def __init__(self, h_curve, m_dot_curve, t_vector,name="Unconspicuous ignitor"):
+    def __init__(self, h_curve, m_dot_curve, t_vector,name="Unconspicuous ignitor", initial_T=293.15):
         """
                 Initialize the ignitor with given time-dependent curves.
 
@@ -116,6 +119,7 @@ class Ignitor():
         self.m_dot_curve = m_dot_curve
         self.t_vector = t_vector
         self.H_dot_curve = np.multiply(m_dot_curve, self.h_curve)
+        self.cp = None
 
     def plot_ignitor_curves(self):
         """
@@ -315,7 +319,7 @@ class Ignitor():
                 h : float or np.ndarray
                     Interpolated specific enthalpy [J/kg].
                 """
-        return np.interp(t, self.t_vector, self.h_curve, left=self.h_curve[0], right=self.h_curve[-1]   )
+        return np.interp(t, self.t_vector, self.h_curve, left=self.h_curve[0], right=self.h_curve[-1])
 
     def get_H_dot(self, t):
         """
@@ -451,40 +455,245 @@ class Ignitor():
                     released between t1 and t2.
                 """
         return self.gas_combustion_products_per_kg*self.get_m_interval(t1, t2)
+    def set_cp(self, cp):
+        self.cp = cp
+    def set_conductivity_factor(self, conductivity_factor):
+        self.conductivity_factor = conductivity_factor
 
+class Nozzle:
+    def __init__(self, A_throat, A_chamber, A_exit, name="Unconspicuous Nozzle"):
+        self.name = name
+        self.A_throat = A_throat
+        self.A_chamber = A_chamber
+        self.A_exit = A_exit
 
+    def get_mach(self, P_t, P, gamma, R_bar):
+        """Return Mach number from stagnation and static pressures."""
+        self.gamma = gamma
+        self.R_bar = R_bar
+        M = np.sqrt((2 / (gamma - 1)) * ((P_t / P) ** ((gamma - 1) / gamma) - 1))
+        return M
 
+    def _A_over_Astar(self, M, gamma):
+        """Area/Mach relation A/A* as a function of M (works for M>0)."""
+        return (1.0 / M) * ((2.0 / (gamma + 1.0) * (1.0 + (gamma - 1.0) / 2.0 * M**2))
+                             ** ((gamma + 1.0) / (2.0 * (gamma - 1.0))))
+
+    def get_M_throat(self, P_t, P_e, gamma):
+        """
+        Robust computation of throat Mach (subsonic root) for an unchoked nozzle.
+        Returns M_throat (<1) or 1.0 if the nozzle is choked.
+        """
+
+        # --- 0. Basic checks ---
+        if P_t <= 0 or P_e <= 0:
+            raise ValueError("Pressures must be positive.")
+
+        # --- 1. Check choking condition ---
+        crit_ratio = (2.0 / (gamma + 1.0)) ** (gamma / (gamma - 1.0))  # p_e/p_t_crit
+        # choked if p_e/p_t <= crit_ratio  <=>  P_t/P_e >= 1/crit_ratio
+        if (P_e / P_t) <= crit_ratio:
+            # Choked: throat Mach = 1
+            self.M_e = None
+            self.M_throat = 1.0
+            return 1.0
+
+        # --- 2. Compute exit Mach number M_e from isentropic relation ---
+        # Guard against tiny numerical negatives inside sqrt
+        ratio = (P_t / P_e)
+        if ratio <= 1.0:
+            # physically the flow is extremely weak; set M_e ~ 0 (practically)
+            M_e = 1e-8
+        else:
+            val = (2.0 / (gamma - 1.0)) * (ratio ** ((gamma - 1.0) / gamma) - 1.0)
+            if val <= 0.0:
+                M_e = 1e-8
+            else:
+                M_e = np.sqrt(val)
+
+        # --- 3. Compute A* from the exit condition:
+        A_e_over_Astar = self._A_over_Astar(M_e, gamma)
+        if A_e_over_Astar <= 0:
+            raise RuntimeError("Computed non-positive A_e/A*; check inputs.")
+        A_star = self.A_exit / A_e_over_Astar
+
+        # target area ratio we need the throat to have:
+        target = self.A_throat / A_star
+        print(target)
+        # if target <= 1:
+        #     target = 1
+
+        # --- 4. Solve for the subsonic Mach M_t such that A/A* = target ---
+        # The A/A* function is >0 and has two branches. We want the subsonic root in (0,1).
+        def resid(M):
+            return self._A_over_Astar(M, gamma) - target
+
+        # bracket in (M_low, M_high) with M_low very small, M_high slightly <1
+        M_low = 1e-8
+        M_high = 1.0 - 1e-8
+
+        # Ensure there is a sign change on the chosen bracket; if not, raise informative error
+        f_low = resid(M_low)
+        f_high = resid(M_high)
+        if np.isnan(f_low) or np.isnan(f_high):
+            raise RuntimeError("Residue evaluated to NaN; check gamma and geometry.")
+        if f_low * f_high > 0:
+            # No sign change: likely unphysical geometry or pressures, or extremely near-choke.
+            # Provide helpful diagnostics instead of silent failure.
+            raise RuntimeError(
+                "Unable to find subsonic throat Mach: resid has same sign at bracket ends.\n"
+                f"Diagnostics: target A/A* = {target:.6g}, A_e/A* (from exit) = {A_e_over_Astar:.6g}, "
+                f"M_e = {M_e:.6g}."
+            )
+
+        M_throat = brentq(resid, M_low, M_high, xtol=1e-12, rtol=1e-10, maxiter=100)
+
+        # store and return
+        self.M_e = M_e
+        self.M_throat = M_throat
+        return M_throat
+
+    def get_m_dot(self, P_t, T_t, R_bar, P_e, gamma):
+        """
+        Compute mass flow rate through the throat.
+        """
+        self.gamma = gamma
+        self.R_bar = R_bar
+
+        # Compute Mach numbers
+        self.Me = self.get_mach(P_t, P_e, gamma=self.gamma, R_bar=self.R_bar)
+        self.M_throat = self.get_M_throat(P_t, P_e, gamma=self.gamma)
+
+        # --- Mass flow formula
+        M = self.M_throat
+        m_dot = ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * \
+                M * (1 + (self.gamma - 1) / 2 * M ** 2) ** (-(self.gamma + 1) / (2 * (self.gamma - 1)))
+
+        self.m_dot = m_dot
+        return m_dot
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    def plot_nozzle_performance_vs_chamber(self, P_e, T_t, R_bar, gamma, P_t_range):
+        """
+        Plot Mach number (throat & exit) and mass flow vs chamber (stagnation) pressure.
+
+        Parameters
+        ----------
+        P_e : float
+            Exit/ambient static pressure [Pa]
+        T_t : float
+            Chamber (stagnation) temperature [K]
+        R_bar : float
+            Gas constant [J/(kg*K)]
+        gamma : float
+            Ratio of specific heats
+        P_t_range : array-like
+            Range of chamber pressures [Pa] to evaluate
+        """
+        self.gamma = gamma
+        self.R_bar = R_bar
+        M_e_list = []
+        M_t_list = []
+        m_dot_list = []
+        ratios = np.array(P_t_range) / P_e  # for optional plotting on same axis
+
+        for P_t in P_t_range:
+            # Exit Mach (isentropic)
+            M_e = self.get_mach(P_t, P_e, gamma=self.gamma, R_bar=self.R_bar)
+
+            # Throat Mach (subsonic branch before choking)
+            try:
+                M_t = self.get_M_throat(P_t, P_e, gamma)
+            except Exception:
+                M_t = np.nan
+
+            # If nozzle is choked (M_t -> 1), clamp value
+            if M_t >= 1.0:
+                M_t = 1.0
+
+            # Mass flow rate at throat
+            m_dot = self.get_m_dot(P_t, P_t, R_bar, P_e, gamma)
+
+            M_e_list.append(M_e)
+            M_t_list.append(M_t)
+            m_dot_list.append(m_dot)
+
+        # --- Compute critical choking pressure ratio ---
+        crit_ratio = (2 / (gamma + 1)) ** (gamma / (gamma - 1))
+        P_t_choke = P_e / crit_ratio
+
+        # --- Plot setup ---
+        fig, ax1 = plt.subplots(figsize=(8, 5))
+
+        ax1.plot(P_t_range, M_t_list, label="M_throat", color='tab:blue', linewidth=2)
+        ax1.plot(P_t_range, M_e_list, label="M_exit", color='tab:cyan', linestyle='--', linewidth=2)
+        ax1.axvline(P_t_choke, color='gray', linestyle=':', label='Choking onset')
+
+        ax1.set_xlabel(r"Chamber Pressure $P_t$ [Pa]")
+        ax1.set_ylabel("Mach number", color='tab:blue')
+        ax1.tick_params(axis='y', labelcolor='tab:blue')
+        ax1.legend(loc="upper left")
+        ax1.grid(True, alpha=0.3)
+
+        # --- Mass flow curve on right axis ---
+        ax2 = ax1.twinx()
+        ax2.plot(P_t_range, m_dot_list, label=r"Mass Flow $\dot{m}$", color='tab:red', linewidth=2)
+        ax2.set_ylabel(r"Mass Flow Rate $\dot{m}$ [kg/s]", color='tab:red')
+        ax2.tick_params(axis='y', labelcolor='tab:red')
+
+        plt.title(f"Nozzle Performance vs Chamber Pressure — {self.name}")
+        plt.tight_layout()
+        plt.show()
 
 # Testing code for the Ignitor class:
 
-t_vector_example = np.linspace(0, 2, 2000)
-m_dot_curve_example = pg.smooth_pulse(t_vector_example, 2, 0.2, 0.2, 3/1000) # [kg/s]
-h_curve_example = np.full(t_vector_example.shape, 2.12*1000*1000) # Black powder constant enthalpy generation
+# t_vector_example = np.linspace(0, 2, 2000)
+# m_dot_curve_example = pg.smooth_pulse(t_vector_example, 2, 0.2, 0.2, 3/1000) # [kg/s]
+# h_curve_example = np.full(t_vector_example.shape, 2.12*1000*1000) # Black powder constant enthalpy generation
+#
+# ign = Ignitor(h_curve_example, m_dot_curve_example, t_vector_example,name="Test ignitor")
+#
+# # Set up the ignition gas mixture (CO2 + N2)
+# combustion_moles_example = 16
+# combustion_products_mass = 1.203   # total combustion products (kg)
+# combustion_products_gas_mass = 0.404   # gaseous part only (kg)
+#
+# # If the massflow was measured only using the gas part then all the mass is gas
+#
+# products_example = gp.fluid({
+#     'CO2': 6/combustion_moles_example,
+#     'N2': 5/combustion_moles_example
+# })
+#
+# # Run the setup method
+# ign.setup_combustion_products(
+#     combustion_products=products_example,
+#     total_combustion_moles=combustion_moles_example,
+#     total_combustion_mass=combustion_products_mass,
+#     total_gas_mass=combustion_products_gas_mass
+# )
+#
+# ign.plot_ignitor_curves()
+#
+# print(ign.get_m_dot(np.pi/2))   # mass flow
+# print(ign.get_h(np.pi/2))       # specific enthalpy
+# print(ign.get_H_dot(np.pi/2))   # power
 
-ign = Ignitor(h_curve_example, m_dot_curve_example, t_vector_example,name="Test ignitor")
+# Nozzle testing code
 
-# Set up the ignition gas mixture (CO2 + N2)
-combustion_moles_example = 16
-combustion_products_mass = 1.203   # total combustion products (kg)
-combustion_products_gas_mass = 0.404   # gaseous part only (kg)
+gamma = 1.4
+R = 287
+P_e = 101325       # ambient pressure [Pa]
+T_t = 300          # K
+A_t = 0.0005       # m²
+A_e = 0.0008       # m²
+A_c = 0.0010       # m²
 
-# If the massflow was measured only using the gas part then all the mass is gas
+nzl = Nozzle(A_t, A_c, A_e)
 
-products_example = gp.fluid({
-    'CO2': 6/combustion_moles_example,
-    'N2': 5/combustion_moles_example
-})
+# Sweep chamber pressure from 0.5 atm up to ~10 atm
+P_t_range = np.linspace(1.1e5, 2e5, 1000)
 
-# Run the setup method
-ign.setup_combustion_products(
-    combustion_products=products_example,
-    total_combustion_moles=combustion_moles_example,
-    total_combustion_mass=combustion_products_mass,
-    total_gas_mass=combustion_products_gas_mass
-)
-
-ign.plot_ignitor_curves()
-
-print(ign.get_m_dot(np.pi/2))   # mass flow
-print(ign.get_h(np.pi/2))       # specific enthalpy
-print(ign.get_H_dot(np.pi/2))   # power
+nzl.plot_nozzle_performance_vs_chamber(P_e, T_t, R, gamma, P_t_range)
