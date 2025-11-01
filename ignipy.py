@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import pulse_generators as pg
 import gaspype as gp
 from scipy.optimize import brentq
+from scipy.optimize import root_scalar
 
 
 try:
@@ -474,106 +475,95 @@ class Nozzle:
         M = np.sqrt((2 / (gamma - 1)) * ((P_t / P) ** ((gamma - 1) / gamma) - 1))
         return M
 
+    def mach_from_area_ratio(self, A_Astar, gamma, bracket=(1e-6, 1.0) ):
+        # if A_Astar <1:
+        #     raise RuntimeError("A_Astar must be greater than 1.")
+        def f(M):
+            term = (2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M ** 2)
+            return (1 / M ** 2) * (term ** ((gamma + 1) / (gamma - 1))) - (A_Astar) ** 2
+
+
+        sol = root_scalar(f, bracket=bracket, method='brentq')
+        # if not sol.converged:
+        #     raise RuntimeError("Root solver did not converge")
+        # return sol.root
+
+        # M_range = np.linspace(0.1, 2, 500)
+        # f_values = [f(M) for M in M_range]
+        #
+        # plt.figure(figsize=(7, 4))
+        # plt.plot(M_range, f_values, label=r"$f(M)$")
+        # if sol.converged:
+        #     plt.plot(sol.root, 0, "or")
+        # plt.axhline(0, color='k', linestyle='--', linewidth=1)
+        # plt.title(f"f(M) vs M  |  A/A*={A_Astar}, γ={gamma}")
+        # plt.xlabel("Mach number M")
+        # plt.ylabel(
+        #     r"$f(M) = \frac{1}{M^2}\left[\frac{2}{\gamma+1}(1+\frac{\gamma-1}{2}M^2)\right]^{\frac{\gamma+1}{\gamma-1}} - (A/A^*)^2$")
+        # plt.grid(True, alpha=0.3)
+        # plt.legend()
+        # plt.show()
+        return sol.root
+
     def _A_over_Astar(self, M, gamma):
         """Area/Mach relation A/A* as a function of M (works for M>0)."""
-        return (1.0 / M) * ((2.0 / (gamma + 1.0) * (1.0 + (gamma - 1.0) / 2.0 * M**2))
-                             ** ((gamma + 1.0) / (2.0 * (gamma - 1.0))))
+        term = (2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M ** 2)
+        A_over_A_star = np.sqrt((1 / M ** 2) * (term ** ((gamma + 1) / (gamma - 1))))
+        return A_over_A_star
+    def get_A_star(self, A, gamma, M):
+        self.gamma = gamma
+        A_over_Astar = self._A_over_Astar(M, gamma)
+        A_star = A/A_over_Astar
+        return A_star
 
-    def get_M_throat(self, P_t, P_e, gamma):
+    def get_M_throat(self, P_t, P_e, gamma, R_bar):
         """
-        Robust computation of throat Mach (subsonic root) for an unchoked nozzle.
-        Returns M_throat (<1) or 1.0 if the nozzle is choked.
+        Return throat Mach number.
         """
-
-        # --- 0. Basic checks ---
-        if P_t <= 0 or P_e <= 0:
-            raise ValueError("Pressures must be positive.")
-
-        # --- 1. Check choking condition ---
-        crit_ratio = (2.0 / (gamma + 1.0)) ** (gamma / (gamma - 1.0))  # p_e/p_t_crit
-        # choked if p_e/p_t <= crit_ratio  <=>  P_t/P_e >= 1/crit_ratio
-        if (P_e / P_t) <= crit_ratio:
-            # Choked: throat Mach = 1
-            self.M_e = None
-            self.M_throat = 1.0
-            return 1.0
-
-        # --- 2. Compute exit Mach number M_e from isentropic relation ---
-        # Guard against tiny numerical negatives inside sqrt
-        ratio = (P_t / P_e)
-        if ratio <= 1.0:
-            # physically the flow is extremely weak; set M_e ~ 0 (practically)
-            M_e = 1e-8
+        self.R_bar = R_bar
+        M_e = self.get_M_e_opt(gamma, P_t, P_e)
+        A_star = self.get_A_star(self.A_exit, gamma, M_e)
+        # print(self.A_throat/ A_star)
+        if A_star > self.A_throat:
+            M_throat = 1
         else:
-            val = (2.0 / (gamma - 1.0)) * (ratio ** ((gamma - 1.0) / gamma) - 1.0)
-            if val <= 0.0:
-                M_e = 1e-8
-            else:
-                M_e = np.sqrt(val)
-
-        # --- 3. Compute A* from the exit condition:
-        A_e_over_Astar = self._A_over_Astar(M_e, gamma)
-        if A_e_over_Astar <= 0:
-            raise RuntimeError("Computed non-positive A_e/A*; check inputs.")
-        A_star = self.A_exit / A_e_over_Astar
-
-        # target area ratio we need the throat to have:
-        target = self.A_throat / A_star
-        print(target)
-        # if target <= 1:
-        #     target = 1
-
-        # --- 4. Solve for the subsonic Mach M_t such that A/A* = target ---
-        # The A/A* function is >0 and has two branches. We want the subsonic root in (0,1).
-        def resid(M):
-            return self._A_over_Astar(M, gamma) - target
-
-        # bracket in (M_low, M_high) with M_low very small, M_high slightly <1
-        M_low = 1e-8
-        M_high = 1.0 - 1e-8
-
-        # Ensure there is a sign change on the chosen bracket; if not, raise informative error
-        f_low = resid(M_low)
-        f_high = resid(M_high)
-        if np.isnan(f_low) or np.isnan(f_high):
-            raise RuntimeError("Residue evaluated to NaN; check gamma and geometry.")
-        if f_low * f_high > 0:
-            # No sign change: likely unphysical geometry or pressures, or extremely near-choke.
-            # Provide helpful diagnostics instead of silent failure.
-            raise RuntimeError(
-                "Unable to find subsonic throat Mach: resid has same sign at bracket ends.\n"
-                f"Diagnostics: target A/A* = {target:.6g}, A_e/A* (from exit) = {A_e_over_Astar:.6g}, "
-                f"M_e = {M_e:.6g}."
-            )
-
-        M_throat = brentq(resid, M_low, M_high, xtol=1e-12, rtol=1e-10, maxiter=100)
-
-        # store and return
-        self.M_e = M_e
-        self.M_throat = M_throat
+            M_throat = self.mach_from_area_ratio(self.A_throat/ A_star, gamma)
+        # print(M_throat)
         return M_throat
 
     def get_m_dot(self, P_t, T_t, R_bar, P_e, gamma):
         """
         Compute mass flow rate through the throat.
         """
+        crit_ratio = (2 / (gamma + 1)) ** (gamma / (gamma - 1))
+        P_crit = crit_ratio * P_t
         self.gamma = gamma
         self.R_bar = R_bar
 
         # Compute Mach numbers
-        self.Me = self.get_mach(P_t, P_e, gamma=self.gamma, R_bar=self.R_bar)
-        self.M_throat = self.get_M_throat(P_t, P_e, gamma=self.gamma)
+        self.Me = self.get_M_e_opt(gamma, P_t, P_e)
+        try:
+            self.M_throat = self.get_M_throat(P_t, P_e, self.gamma, self.R_bar)
+        except Exception:
+            self.M_throat = 1
 
         # --- Mass flow formula
-        M = self.M_throat
-        m_dot = ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * \
-                M * (1 + (self.gamma - 1) / 2 * M ** 2) ** (-(self.gamma + 1) / (2 * (self.gamma - 1)))
+        if self.M_throat < 1:
+            M = self.M_throat
+            m_dot = ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * M * (
+                        1 + (self.gamma - 1) / 2 * M ** 2) ** (-(self.gamma + 1) / (2 * (self.gamma - 1)))
 
+        else:
+            M = 1
+            m_dot= ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * (((gamma+1)/2)**((gamma+1)/(2-2*gamma)))
+
+        print(m_dot)
         self.m_dot = m_dot
         return m_dot
-
-    import numpy as np
-    import matplotlib.pyplot as plt
+    def get_M_e_opt(self, gamma, P_t, P_e):
+        self.gamma = gamma
+        M_e_opt = np.sqrt((2 / (gamma - 1)) * ((P_t / P_e) ** ((gamma - 1) / gamma) - 1))
+        return M_e_opt
 
     def plot_nozzle_performance_vs_chamber(self, P_e, T_t, R_bar, gamma, P_t_range):
         """
@@ -601,35 +591,35 @@ class Nozzle:
 
         for P_t in P_t_range:
             # Exit Mach (isentropic)
-            M_e = self.get_mach(P_t, P_e, gamma=self.gamma, R_bar=self.R_bar)
+            M_e = self.get_M_e_opt(gamma, P_t, P_e)
 
             # Throat Mach (subsonic branch before choking)
             try:
-                M_t = self.get_M_throat(P_t, P_e, gamma)
+                M_t = self.get_M_throat(P_t, P_e, gamma, R_bar)
             except Exception:
                 M_t = np.nan
 
             # If nozzle is choked (M_t -> 1), clamp value
             if M_t >= 1.0:
                 M_t = 1.0
+                M_e = np.nan
 
             # Mass flow rate at throat
-            m_dot = self.get_m_dot(P_t, P_t, R_bar, P_e, gamma)
+
+            m_dot = self.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+
 
             M_e_list.append(M_e)
             M_t_list.append(M_t)
             m_dot_list.append(m_dot)
 
         # --- Compute critical choking pressure ratio ---
-        crit_ratio = (2 / (gamma + 1)) ** (gamma / (gamma - 1))
-        P_t_choke = P_e / crit_ratio
 
         # --- Plot setup ---
         fig, ax1 = plt.subplots(figsize=(8, 5))
 
         ax1.plot(P_t_range, M_t_list, label="M_throat", color='tab:blue', linewidth=2)
-        ax1.plot(P_t_range, M_e_list, label="M_exit", color='tab:cyan', linestyle='--', linewidth=2)
-        ax1.axvline(P_t_choke, color='gray', linestyle=':', label='Choking onset')
+        ax1.plot(P_t_range, M_e_list, label="M_exit_optimum", color='tab:cyan', linestyle='--', linewidth=2)
 
         ax1.set_xlabel(r"Chamber Pressure $P_t$ [Pa]")
         ax1.set_ylabel("Mach number", color='tab:blue')
@@ -646,6 +636,80 @@ class Nozzle:
         plt.title(f"Nozzle Performance vs Chamber Pressure — {self.name}")
         plt.tight_layout()
         plt.show()
+
+    def plot_nozzle_performance_vs_exit(self, P_t, T_t, R_bar, gamma, P_e_range):
+        """
+        Plot Mach number (throat & exit) and mass flow vs exit pressure.
+
+        Parameters
+        ----------
+        P_t : float
+            Chamber (stagnation) pressure [Pa]
+        T_t : float
+            Chamber (stagnation) temperature [K]
+        R_bar : float
+            Gas constant [J/(kg*K)]
+        gamma : float
+            Ratio of specific heats
+        P_e_range : array-like
+            Range of exit/ambient pressures [Pa] to evaluate
+        """
+        self.gamma = gamma
+        self.R_bar = R_bar
+        M_e_list = []
+        M_t_list = []
+        m_dot_list = []
+        ratios = np.array(P_t) / np.array(P_e_range)  # for optional plotting
+
+        for P_e in P_e_range:
+            # Exit Mach (isentropic)
+            M_e = self.get_M_e_opt(gamma, P_t, P_e)
+
+            # Throat Mach (subsonic branch before choking)
+            try:
+                M_t = self.get_M_throat(P_t, P_e, gamma, R_bar)
+            except Exception:
+                M_t = np.nan
+
+            # If nozzle is choked (M_t -> 1), clamp value
+            if M_t >= 1.0:
+                M_t = 1.0
+                M_e = np.nan
+
+            # Mass flow rate at throat
+            m_dot = self.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+
+            M_e_list.append(M_e)
+            M_t_list.append(M_t)
+            m_dot_list.append(m_dot)
+
+        # --- Compute critical choking pressure ratio ---
+        crit_ratio = (2 / (gamma + 1)) ** (gamma / (gamma - 1))
+        # P_e_choke = P_t * crit_ratio
+
+        # --- Plot setup ---
+        fig, ax1 = plt.subplots(figsize=(8, 5))
+
+        ax1.plot(P_e_range, M_t_list, label="M_throat", color='tab:blue', linewidth=2)
+        ax1.plot(P_e_range, M_e_list, label="M_exit_optimum", color='tab:cyan', linestyle='--', linewidth=2)
+        # ax1.axvline(P_e_choke, color='gray', linestyle=':', label='Choking onset')
+
+        ax1.set_xlabel(r"Exit Pressure $P_e$ [Pa]")
+        ax1.set_ylabel("Mach number", color='tab:blue')
+        ax1.tick_params(axis='y', labelcolor='tab:blue')
+        ax1.legend(loc="upper right")
+        ax1.grid(True, alpha=0.3)
+
+        # --- Mass flow curve on right axis ---
+        ax2 = ax1.twinx()
+        ax2.plot(P_e_range, m_dot_list, label=r"Mass Flow $\dot{m}$", color='tab:red', linewidth=2)
+        ax2.set_ylabel(r"Mass Flow Rate $\dot{m}$ [kg/s]", color='tab:red')
+        ax2.tick_params(axis='y', labelcolor='tab:red')
+
+        plt.title(f"Nozzle Performance vs Exit Pressure — {self.name}")
+        plt.tight_layout()
+        plt.show()
+
 
 # Testing code for the Ignitor class:
 
@@ -686,14 +750,23 @@ class Nozzle:
 gamma = 1.4
 R = 287
 P_e = 101325       # ambient pressure [Pa]
-T_t = 300          # K
+T_t = 1000          # K
 A_t = 0.0005       # m²
-A_e = 0.0008       # m²
+A_e = 1.5*A_t
 A_c = 0.0010       # m²
 
 nzl = Nozzle(A_t, A_c, A_e)
 
-# Sweep chamber pressure from 0.5 atm up to ~10 atm
-P_t_range = np.linspace(1.1e5, 2e5, 1000)
+# Sweep chamber pressure
+
+P_t_range = np.linspace(P_e+0.1, 2*P_e, 1000)
 
 nzl.plot_nozzle_performance_vs_chamber(P_e, T_t, R, gamma, P_t_range)
+
+P_t = 2e5           # Chamber pressure [Pa] (~5 atm)
+
+# Sweep exit pressure from very low (high expansion) up to near chamber pressure
+P_e_range = np.linspace(1e5, P_t - 1e3, 500)  # Pa
+
+# Plot nozzle performance vs exit pressure
+nzl.plot_nozzle_performance_vs_exit(P_t, T_t, R, gamma, P_e_range)
