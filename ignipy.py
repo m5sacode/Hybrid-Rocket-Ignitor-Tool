@@ -121,7 +121,6 @@ class Ignitor():
         self.t_vector = t_vector
         self.H_dot_curve = np.multiply(m_dot_curve, self.h_curve)
         self.cp = None
-
     def plot_ignitor_curves(self):
         """
         Plot the ignitor curves vs. time:
@@ -182,7 +181,6 @@ class Ignitor():
             plt.show()
         else:
             print("⚠️ No integral curves computed yet. Run setup_combustion_products() first.")
-
     def setup_combustion_products(self, combustion_products, total_combustion_moles, total_combustion_mass,
                                   total_gas_mass):
         """
@@ -225,7 +223,6 @@ class Ignitor():
         self.gas_combustion_products_per_kg = self.gas_combustion_products_per_kg * scaling_factor
         self.compute_mass_integrals_arrays()
         print("new mass", self.gas_combustion_products_per_kg.get_mass())
-
     def get_m_dot(self, t):
         """
         Return the instantaneous total mass flow rate [kg/s] at a given time.
@@ -241,7 +238,6 @@ class Ignitor():
             Interpolated mass flow rate [kg/s].
         """
         return np.interp(t, self.t_vector, self.m_dot_curve, left=0.0, right=0.0)
-
     def get_gm_dot(self, t):
         """
                 Return the instantaneous gas-phase mass flow rate [kg/s] at a given time.
@@ -257,7 +253,6 @@ class Ignitor():
                     Interpolated gas-phase mass flow rate [kg/s].
                 """
         return np.interp(t, self.t_vector, self.gm_dot_curve, left=0.0, right=0.0)
-
     def get_gm_integral(self, t):
         """
                 Return the cumulative gas mass released [kg] at a given time.
@@ -273,7 +268,6 @@ class Ignitor():
                     Interpolated cumulative gas mass [kg].
                 """
         return np.interp(t, self.t_vector, self.gas_mass_integral_curve, left=0.0, right=0.0)
-
     def get_m_integral(self, t):
         """
                 Return the cumulative total combusted mass [kg] at a given time.
@@ -289,7 +283,6 @@ class Ignitor():
                     Interpolated cumulative total mass [kg].
                 """
         return np.interp(t, self.t_vector, self.mass_integral_curve, left=0.0, right=0.0)
-
     def get_H_integral(self, t):
         """
                 Return the cumulative enthalpy release [J] at a given time.
@@ -305,7 +298,6 @@ class Ignitor():
                     Interpolated cumulative enthalpy [J].
                 """
         return np.interp(t, self.t_vector, self.H_integral_curve, left=0.0, right=0.0)
-
     def get_h(self, t):
         """
                 Return the specific enthalpy [J/kg] at a given time.
@@ -321,7 +313,6 @@ class Ignitor():
                     Interpolated specific enthalpy [J/kg].
                 """
         return np.interp(t, self.t_vector, self.h_curve, left=self.h_curve[0], right=self.h_curve[-1])
-
     def get_H_dot(self, t):
         """
                 Return the instantaneous enthalpy rate (power) [W] = m_dot * h.
@@ -337,7 +328,6 @@ class Ignitor():
                     Interpolated enthalpy rate [W].
                 """
         return np.interp(t, self.t_vector, self.H_dot_curve, left=0.0, right=0.0)
-
     def compute_mass_integrals_arrays(self):
         """
                 Compute cumulative integrals of:
@@ -383,7 +373,6 @@ class Ignitor():
 
         print("Total mass combusted:", self.mass_integral_curve[-1], "kg")
         print("Total gas mass released:", self.gas_mass_integral_curve[-1], "kg")
-
     def get_H_interval(self, t1, t2):
         """
                 Return total enthalpy released [J] between two times.
@@ -435,8 +424,6 @@ class Ignitor():
                     Gas mass released [kg] between t1 and t2.
                 """
         return self.get_gm_integral(t2) - self.get_gm_integral(t1)
-
-
     def get_fluid_interval(self, t1, t2):
         """
                 Return the equivalent gas mixture (combustion products) for the
@@ -461,20 +448,18 @@ class Ignitor():
     def set_conductivity_factor(self, conductivity_factor):
         self.conductivity_factor = conductivity_factor
 
-class Nozzle:
+class Nozzle():
     def __init__(self, A_throat, A_chamber, A_exit, name="Unconspicuous Nozzle"):
         self.name = name
         self.A_throat = A_throat
         self.A_chamber = A_chamber
         self.A_exit = A_exit
-
     def get_mach(self, P_t, P, gamma, R_bar):
         """Return Mach number from stagnation and static pressures."""
         self.gamma = gamma
         self.R_bar = R_bar
         M = np.sqrt((2 / (gamma - 1)) * ((P_t / P) ** ((gamma - 1) / gamma) - 1))
         return M
-
     def mach_from_area_ratio(self, A_Astar, gamma, bracket=(1e-6, 1.0) ):
         # if A_Astar <1:
         #     raise RuntimeError("A_Astar must be greater than 1.")
@@ -504,7 +489,6 @@ class Nozzle:
         # plt.legend()
         # plt.show()
         return sol.root
-
     def _A_over_Astar(self, M, gamma):
         """Area/Mach relation A/A* as a function of M (works for M>0)."""
         term = (2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M ** 2)
@@ -515,7 +499,6 @@ class Nozzle:
         A_over_Astar = self._A_over_Astar(M, gamma)
         A_star = A/A_over_Astar
         return A_star
-
     def get_M_throat(self, P_t, P_e, gamma, R_bar):
         """
         Return throat Mach number.
@@ -530,7 +513,6 @@ class Nozzle:
             M_throat = self.mach_from_area_ratio(self.A_throat/ A_star, gamma)
         # print(M_throat)
         return M_throat
-
     def get_m_dot(self, P_t, T_t, R_bar, P_e, gamma):
         """
         Compute mass flow rate through the throat.
@@ -564,7 +546,6 @@ class Nozzle:
         self.gamma = gamma
         M_e_opt = np.sqrt((2 / (gamma - 1)) * ((P_t / P_e) ** ((gamma - 1) / gamma) - 1))
         return M_e_opt
-
     def plot_nozzle_performance_vs_chamber(self, P_e, T_t, R_bar, gamma, P_t_range):
         """
         Plot Mach number (throat & exit) and mass flow vs chamber (stagnation) pressure.
@@ -636,7 +617,6 @@ class Nozzle:
         plt.title(f"Nozzle Performance vs Chamber Pressure — {self.name}")
         plt.tight_layout()
         plt.show()
-
     def plot_nozzle_performance_vs_exit(self, P_t, T_t, R_bar, gamma, P_e_range):
         """
         Plot Mach number (throat & exit) and mass flow vs exit pressure.
@@ -710,6 +690,29 @@ class Nozzle:
         plt.tight_layout()
         plt.show()
 
+class Injector():
+    def __init__(self, Cd, ManifoldPressure, Fluid,total_Area, name="Unconspicuous Injector"):
+        self.Cd = Cd #discharge coefficient
+        self.ManifoldPressure = ManifoldPressure
+        self.total_Area = total_Area
+        self.fluid = Fluid
+    def get_choked_massflow(self, T):
+        Cp = self.fluid.get_cp(t=T)
+        Cv = Cp - 8.314
+        gamma = Cp/Cv
+        rho = self.fluid.get_density(t=T, p=self.ManifoldPressure)
+        gammafunction = (2/(gamma+1))**((gamma+1)/(gamma-1))
+        self.choked_massflow = self.Cd*self.total_Area*np.sqrt(gamma*rho*self.ManifoldPressure*gammafunction)
+        return self.choked_massflow
+    def get_massflow(self, ChamberPressure, T):
+        rho = self.fluid.get_density(t=T, p=self.ManifoldPressure)
+        pressure_delta = self.ManifoldPressure - ChamberPressure
+        m_dot=self.Cd*self.total_Area*np.sqrt(2*rho*pressure_delta)
+        choked_m_dot = self.get_choked_massflow(T)
+        if m_dot > choked_m_dot:
+            m_dot = choked_m_dot
+            print("choked flow reached at injector")
+        return m_dot
 
 # Testing code for the Ignitor class:
 
