@@ -121,6 +121,7 @@ class Ignitor():
         self.t_vector = t_vector
         self.H_dot_curve = np.multiply(m_dot_curve, self.h_curve)
         self.cp = None
+        self.T = initial_T
     def plot_ignitor_curves(self):
         """
         Plot the ignitor curves vs. time:
@@ -445,8 +446,24 @@ class Ignitor():
         return self.gas_combustion_products_per_kg*self.get_m_interval(t1, t2)
     def set_cp(self, cp):
         self.cp = cp
-    def set_conductivity_factor(self, conductivity_factor):
-        self.conductivity_factor = conductivity_factor
+    def set_timing(self, ignition_start):
+        self.ignition_start = ignition_start
+        self.compute_mass_integrals_arrays()
+    def update(self, t, dt):
+        if t>self.ignition_start:
+            t = t-self.ignition_start
+            m_released = self.get_gm_interval(t, t+dt)
+            fluid_released = self.get_fluid_interval(t, t+dt)
+            remaining_ignitor_mass = self.get_m_integral(t+dt)
+            heat_released = self.get_H_interval(t, t+dt)
+        else:
+            m_released = 0
+            fluid_released = None
+            remaining_ignitor_mass = None
+            heat_released = 0
+        return m_released, fluid_released, remaining_ignitor_mass, heat_released
+
+
 
 class Nozzle():
     def __init__(self, A_throat, A_chamber, A_exit, name="Unconspicuous Nozzle"):
@@ -691,11 +708,13 @@ class Nozzle():
         plt.show()
 
 class Injector():
-    def __init__(self, Cd, ManifoldPressure, Fluid,total_Area, name="Unconspicuous Injector"):
+    def __init__(self, Cd, ManifoldPressure, Fluid_1kg,total_Area, ManifoldT, name="Unconspicuous Injector"):
         self.Cd = Cd #discharge coefficient
         self.ManifoldPressure = ManifoldPressure
+        self.ManifoldT = ManifoldT
         self.total_Area = total_Area
-        self.fluid = Fluid
+        self.fluid = Fluid_1kg
+        self.name = name
     def get_choked_massflow(self, T):
         Cp = self.fluid.get_cp(t=T)
         Cv = Cp - 8.314
@@ -713,6 +732,120 @@ class Injector():
             m_dot = choked_m_dot
             print("choked flow reached at injector")
         return m_dot
+    def set_timing(self, valve_open):
+        self.valve_open_t = valve_open
+    def update(self, t, dt, chamber_P):
+        T = self.ManifoldT
+        if t>self.valve_open_t:
+            m_dot = self.get_massflow(chamber_P, T)
+            m_added = m_dot*dt
+            fluid_added = self.fluid*m_added
+        else:
+            m_added, fluid_added, T = 0, None, T
+        return m_added, fluid_added, T
+
+
+class Grain():
+    def __init__(self, mass, area, cp, cp_gas,h_fg, h_sf, heat_transfer_coefficient, T_melt, T_gas ,initial_T=293.15,name="Unconspicuous Grain"):
+        self.area = area
+        self.cp = cp
+        self.h_fg = h_fg
+        self.name = name
+        self.k_h = heat_transfer_coefficient
+        self.T_melt = T_melt
+        self.T = initial_T
+        self.thermal_mass = mass
+        self.liquid_mass = 0
+        self.h_sf = h_sf
+        self.T_gas = T_gas
+        self.cp_gas = cp_gas
+    def update(self, dt, T_ambient):
+        # Assumes pressures don't vary much
+        Q = dt*self.k_h*self.area*(T_ambient-self.T)
+        gas_released = 0
+        if (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
+            self.T = self.T+ Q/(self.cp*self.thermal_mass)
+        elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
+            self.liquid_mass += Q*dt/self.h_sf
+            self.thermal_mass -= Q*dt/self.h_sf
+        elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
+            self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
+        elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
+            gas_released = Q * dt / self.h_sf
+            self.liquid_mass -= Q * dt / self.h_sf
+        else:
+            gas_released = 0
+            print("Grain thermal mass has runned out")
+        return gas_released, Q
+    def setup_burn(self, output_fluid_per_mole, stoich_OF_mass, reaction_enthalpy, gas_flash_T, A_constant, E_a):
+        self.flashT = gas_flash_T
+        self.out_fluid_per_mole = output_fluid_per_mole
+        self.stoich_OF_mass = stoich_OF_mass
+        self.reaction_enthalpy = reaction_enthalpy
+
+class Chamber():
+    def __init__(self, volume, initialP, initial_fluid, initial_T=293.15, name="Unconspicuous Chamber"):
+        self.volume = volume
+        self.P = initialP
+        self.T = initial_T
+        self.name = name
+        self.fluid = initial_fluid
+        self.mass = self.fluid.get_density(t=initial_T, p=initialP)*self.volume
+
+class Engine():
+    def __init__(self, Ignitor, Nozzle, Injector, Grain, Chamber):
+        self.Ignitor = Ignitor
+        self.Nozzle = Nozzle
+        self.Injector = Injector
+        self.Grain = Grain
+        self.Chamber = Chamber
+        self.Time = 0
+    def update(self, dt):
+
+        # Ignitor stuff
+        ig_m_released, ig_fluid_released, ig_remaining_ignitor_mass, ig_heat_released = self.Ignitor.update(self.Time, dt)
+
+        # Injector stuff
+        in_m_added, in_fluid_added, in_T = self.Injector.update(self.Time, dt, self.Chamber.P)
+
+        # Grain stuff
+
+        gas_prop_released, Q_consumed = self.Grain.update(dt, self.Chamber.T)
+        
+        # TO DO: SET UP ENTHALPY AND GASSES OF BURN, SET UP NOZZLE MASS FLOW, PLOT
+
+
+        # Update values
+
+        if in_fluid_added is not None:
+            n_chamber = self.Chamber.fluid.get_n()
+            cp1 = self.Chamber.fluid.get_cp(self.Chamber.T) * n_chamber
+            m1 = self.Chamber.mass
+            m2 = in_m_added
+            n_injector = in_fluid_added.get_n()
+            cp2 = in_fluid_added.get_cp(in_T) * n_injector
+            self.Chamber.fluid  = self.Chamber.fluid + in_fluid_added
+            T1 = self.Chamber.T
+            T2 = in_T
+            self.Chamber.T = (m1*cp1*T1 + m2*cp2*T2)/(m1*cp1+m2*cp2)
+
+        if ig_fluid_released is not None:
+            self.Chamber.fluid  = self.Chamber.fluid + ig_fluid_released
+
+        n_chamber=self.Chamber.fluid.get_n()
+        cp = self.Chamber.fluid.get_cp(self.Chamber.T)*n_chamber
+        self.Chamber.T = self.Chamber.T + ig_heat_released/cp
+
+
+
+        self.Time += dt
+
+
+
+
+
+
+
 
 # Testing code for the Ignitor class:
 
@@ -750,26 +883,26 @@ class Injector():
 
 # Nozzle testing code
 
-gamma = 1.4
-R = 287
-P_e = 101325       # ambient pressure [Pa]
-T_t = 1000          # K
-A_t = 0.0005       # m²
-A_e = 1.5*A_t
-A_c = 0.0010       # m²
-
-nzl = Nozzle(A_t, A_c, A_e)
-
-# Sweep chamber pressure
-
-P_t_range = np.linspace(P_e+0.1, 2*P_e, 1000)
-
-nzl.plot_nozzle_performance_vs_chamber(P_e, T_t, R, gamma, P_t_range)
-
-P_t = 2e5           # Chamber pressure [Pa] (~5 atm)
-
-# Sweep exit pressure from very low (high expansion) up to near chamber pressure
-P_e_range = np.linspace(1e5, P_t - 1e3, 500)  # Pa
-
-# Plot nozzle performance vs exit pressure
-nzl.plot_nozzle_performance_vs_exit(P_t, T_t, R, gamma, P_e_range)
+# gamma = 1.4
+# R = 287
+# P_e = 101325       # ambient pressure [Pa]
+# T_t = 1000          # K
+# A_t = 0.0005       # m²
+# A_e = 1.5*A_t
+# A_c = 0.0010       # m²
+#
+# nzl = Nozzle(A_t, A_c, A_e)
+#
+# # Sweep chamber pressure
+#
+# P_t_range = np.linspace(P_e+0.1, 2*P_e, 1000)
+#
+# nzl.plot_nozzle_performance_vs_chamber(P_e, T_t, R, gamma, P_t_range)
+#
+# P_t = 2e5           # Chamber pressure [Pa] (~5 atm)
+#
+# # Sweep exit pressure from very low (high expansion) up to near chamber pressure
+# P_e_range = np.linspace(1e5, P_t - 1e3, 500)  # Pa
+#
+# # Plot nozzle performance vs exit pressure
+# nzl.plot_nozzle_performance_vs_exit(P_t, T_t, R, gamma, P_e_range)
