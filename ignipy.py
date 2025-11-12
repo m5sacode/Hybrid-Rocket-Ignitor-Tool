@@ -466,7 +466,7 @@ class Ignitor():
 
 
 class Nozzle():
-    def __init__(self, A_throat, A_chamber, A_exit, name="Unconspicuous Nozzle"):
+    def __init__(self, A_throat, A_chamber, A_exit , name="Unconspicuous Nozzle"):
         self.name = name
         self.A_throat = A_throat
         self.A_chamber = A_chamber
@@ -759,11 +759,12 @@ class Grain():
         self.h_sf = h_sf
         self.T_gas = T_gas
         self.cp_gas = cp_gas
+
     def update(self, dt, T_ambient):
         # Assumes pressures don't vary much
         Q = dt*self.k_h*self.area*(T_ambient-self.T)
         gas_released = 0
-        if (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
+        if  (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
             self.T = self.T+ Q/(self.cp*self.thermal_mass)
         elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
             self.liquid_mass += Q*dt/self.h_sf
@@ -793,13 +794,17 @@ class Chamber():
         self.mass = self.fluid.get_density(t=initial_T, p=initialP)*self.volume
 
 class Engine():
-    def __init__(self, Ignitor, Nozzle, Injector, Grain, Chamber):
+    def __init__(self, Ignitor, Nozzle, Injector, Grain, Chamber, ambient_P=101325):
         self.Ignitor = Ignitor
         self.Nozzle = Nozzle
         self.Injector = Injector
         self.Grain = Grain
         self.Chamber = Chamber
         self.Time = 0
+        self.AmbientPressure = ambient_P
+        self.ox_mass = 0
+        self.gas_f_mass = 0
+
     def update(self, dt):
 
         # Ignitor stuff
@@ -807,12 +812,34 @@ class Engine():
 
         # Injector stuff
         in_m_added, in_fluid_added, in_T = self.Injector.update(self.Time, dt, self.Chamber.P)
+        self.ox_mass += in_m_added
 
         # Grain stuff
 
         gas_prop_released, Q_consumed = self.Grain.update(dt, self.Chamber.T)
-        
-        # TO DO: SET UP ENTHALPY AND GASSES OF BURN, SET UP NOZZLE MASS FLOW, PLOT
+        self.gas_f_mass += gas_prop_released
+
+        # TO DO: SET UP ENTHALPY AND GASSES OF BURN
+        # Grain burn stuff... In the long run I'll use arrhenius to find how much reacts
+        burned_fuel_mass = 0
+
+        added_burn_gas = None
+        added_burn_enthalpy = 0
+
+        if gas_prop_released>0 and self.Chamber.T>self.Grain.flashT:
+            required_ox_mass = self.gas_f_mass * self.Grain.stoich_OF_mass
+
+            if self.ox_mass > required_ox_mass:
+                burned_fuel_mass = self.gas_f_mass
+                self.gas_f_mass = 0
+                self.ox_mass -= required_ox_mass
+            else:
+                burned_fuel_mass = self.ox_mass/self.Grain.stoich_OF_mass
+                self.ox_mass = 0
+                self.gas_f_mass -= burned_fuel_mass
+            added_burn_enthalpy = self.Grain.reaction_enthalpy*burned_fuel_mass
+            added_burn_gas = self.Grain.out_fluid_per_mole*(1/self.Grain.out_fluid_per_mole.get_mass())
+
 
 
         # Update values
@@ -832,13 +859,131 @@ class Engine():
         if ig_fluid_released is not None:
             self.Chamber.fluid  = self.Chamber.fluid + ig_fluid_released
 
+        if added_burn_gas is not None:
+            self.Chamber.fluid = self.Chamber.fluid + added_burn_gas
+
         n_chamber=self.Chamber.fluid.get_n()
         cp = self.Chamber.fluid.get_cp(self.Chamber.T)*n_chamber
-        self.Chamber.T = self.Chamber.T + ig_heat_released/cp
+        self.Chamber.T = self.Chamber.T + (ig_heat_released+added_burn_enthalpy)/cp
+
+        # --- Update chamber pressure ---
+        R_bar = self.Chamber.fluid.get_R()  # specific gas constant (J/kg·K)
+        rho = self.Chamber.mass / self.Chamber.V
+        self.Chamber.P = rho * R_bar * self.Chamber.T
+
+        # --- Compute nozzle mass flow and thrust ---
+        gamma = self.Chamber.fluid.get_gamma(self.Chamber.T)
+        P_t = self.Chamber.P
+        T_t = self.Chamber.T
+        P_e = self.AmbientPressure
+        m_dot_noz = self.Nozzle.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+
+        # --- Deplete chamber mass due to nozzle flow ---
+        m_expelled = m_dot_noz * dt
+        m_expelled = min(m_expelled, self.Chamber.mass)
+        self.Chamber.mass -= m_expelled
+
+        # --- Update chamber pressure again after outflow ---
+        rho = max(self.Chamber.mass / self.Chamber.V, 1e-9)
+        self.Chamber.P = rho * R_bar * self.Chamber.T
 
 
 
         self.Time += dt
+
+    def run_ignition_sequence(self, t_end=5.0, dt=1e-3,
+                              ignition_start=0.2, injector_start=0.3,
+                              grain_ignite=0.35, shutdown=4.0,
+                              verbose=False):
+        """
+        Simulate a full ignition sequence for the self object.
+        Parameters
+        ----------
+        engine : Engine
+            Initialized Engine object (with Ignitor, Injector, etc.)
+        t_end : float
+            End time of simulation [s].
+        dt : float
+            Time step [s].
+        ignition_start, injector_start, grain_ignite, shutdown : float
+            Event times (s) for plotting reference lines.
+        Returns
+        -------
+        results : dict
+            Dictionary with time history of key variables.
+        """
+        # --- Storage arrays ---
+        times, pressures, temps, mdots, machs = [], [], [], [], []
+        for step in range(int(t_end / dt)):
+            t = self.Time
+            # Example: turn on subsystems at event times
+            if hasattr(self.Ignitor, "active"):
+                self.Ignitor.active = t >= ignition_start
+            if hasattr(self.Injector, "active"):
+                self.Injector.active = t >= injector_start
+            if hasattr(self.Grain, "ignited"):
+                self.Grain.ignited = t >= grain_ignite
+            # --- Run self update ---
+            self.update(dt)
+            # --- Record ---
+            times.append(self.Time)
+            pressures.append(self.Chamber.P)
+            temps.append(self.Chamber.T)
+            # Recompute nozzle quantities for logging
+            gamma = self.Chamber.fluid.get_gamma(self.Chamber.T)
+            R_bar = self.Chamber.fluid.get_R()
+            P_t = self.Chamber.P
+            T_t = self.Chamber.T
+            P_e = self.AmbientPressure
+            m_dot = self.Nozzle.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+            mdots.append(m_dot)
+            # nozzle exit Mach (approx)
+            try:
+                A_ratio = self.Nozzle.A_exit / self.Nozzle.A_throat
+                M_e = self.Nozzle.mach_from_area_ratio(A_ratio, gamma, supersonic=True)
+            except Exception:
+                M_e = np.nan
+            machs.append(M_e)
+            if verbose and step % 500 == 0:
+                print(f"t={t:.3f}s, P={self.Chamber.P / 1e6:.3f} MPa, T={self.Chamber.T:.1f} K")
+            if t > t_end:
+                break
+        # --- Plot results ---
+        fig, axs = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
+        axs[0].plot(times, np.array(pressures) / 1e6)
+        axs[0].set_ylabel("Chamber Pressure [MPa]")
+        axs[0].grid(True)
+        axs[1].plot(times, temps)
+        axs[1].set_ylabel("Chamber Temperature [K]")
+        axs[1].grid(True)
+        axs[2].plot(times, mdots)
+        axs[2].set_ylabel("Nozzle Mass Flow [kg/s]")
+        axs[2].grid(True)
+        axs[3].plot(times, machs)
+        axs[3].set_ylabel("Nozzle Exit Mach")
+        axs[3].set_xlabel("Time [s]")
+        axs[3].grid(True)
+        # --- Vertical event lines ---
+        for ax in axs:
+            for ev_time, label in [
+                (ignition_start, "Ignitor ON"),
+                (injector_start, "Injector ON"),
+                (grain_ignite, "Grain Ignition"),
+                (shutdown, "Shutdown")
+            ]:
+                ax.axvline(ev_time, color='r', linestyle='--', alpha=0.7)
+                ax.text(ev_time, ax.get_ylim()[1] * 0.95, label, rotation=90,
+                        va='top', ha='right', fontsize=8, color='r')
+        plt.tight_layout()
+        plt.show()
+        # --- Return results for post-processing ---
+        return {
+            "time": np.array(times),
+            "P": np.array(pressures),
+            "T": np.array(temps),
+            "m_dot": np.array(mdots),
+            "Mach": np.array(machs)
+        }
 
 
 

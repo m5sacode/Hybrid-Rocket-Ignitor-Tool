@@ -127,12 +127,12 @@ def smooth_rise_linear_fall(
 
 
 # Example usage
-x = np.linspace(0, 2, 2000)
-y = smooth_rise_linear_fall(x, duration=2.0, rise_time=0.4, area=1.5)
-
-plt.plot(x, y)
-plt.title("Smooth Rise + Linear Fall Pulse (Controlled Area)")
-plt.xlabel("Time")
-plt.ylabel("Amplitude")
-plt.grid(True)
-plt.show()
+# x = np.linspace(0, 2, 2000)
+# y = smooth_rise_linear_fall(x, duration=2.0, rise_time=0.4, area=1.5)
+#
+# plt.plot(x, y)
+# plt.title("Smooth Rise + Linear Fall Pulse (Controlled Area)")
+# plt.xlabel("Time")
+# plt.ylabel("Amplitude")
+# plt.grid(True)
+# plt.show()
