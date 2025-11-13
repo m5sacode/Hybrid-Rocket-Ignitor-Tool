@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.constants import grain
+
 import pulse_generators as pg
 import gaspype as gp
 from scipy.optimize import brentq
@@ -754,15 +756,24 @@ class Injector():
         pressure_delta = self.ManifoldPressure - ChamberPressure
         self.m_dot=self.Cd*self.total_Area*np.sqrt(2*rho*pressure_delta)
         choked_m_dot = self.get_choked_massflow(T)
-        if self.m_dot > choked_m_dot:
-            m_dot = choked_m_dot
-            # print("choked flow reached at injector")
-        return self.m_dot
-    def set_timing(self, valve_open):
+
+        # --- Prevent negative or nan pressure difference ---
+        if pressure_delta <= 0:
+            self.m_dot = 0
+            return self.m_dot
+        else:
+            self.m_dot = self.Cd * self.total_Area * np.sqrt(2 * rho * pressure_delta)
+            choked_m_dot = self.get_choked_massflow(T)
+            if self.m_dot > choked_m_dot:
+                m_dot = choked_m_dot
+                # print("choked flow reached at injector")
+            return self.m_dot
+    def set_timing(self, valve_open, valve_close):
         self.valve_open_t = valve_open
+        self.valve_close_t = valve_close
     def update(self, t, dt, chamber_P):
         T = self.ManifoldT
-        if t>self.valve_open_t:
+        if t>self.valve_open_t and t<self.valve_close_t:
             self.m_dot = self.get_massflow(chamber_P, T)
             m_added = self.m_dot*dt
             fluid_added = self.fluid*m_added
@@ -772,7 +783,7 @@ class Injector():
 
 
 class Grain():
-    def __init__(self, mass, area, cp, cp_gas,h_fg, h_sf, heat_transfer_coefficient, T_melt, T_gas ,initial_T=293.15,name="Unconspicuous Grain"):
+    def __init__(self, mass,thermal_mass, area, cp, cp_gas,h_fg, h_sf, heat_transfer_coefficient, T_melt, T_gas ,initial_T=293.15,name="Unconspicuous Grain"):
         self.area = area
         self.cp = cp
         self.h_fg = h_fg
@@ -780,7 +791,8 @@ class Grain():
         self.k_h = heat_transfer_coefficient
         self.T_melt = T_melt
         self.T = initial_T
-        self.thermal_mass = mass
+        self.thermal_mass = thermal_mass
+        self.solid_mass = mass
         self.liquid_mass = 0
         self.h_sf = h_sf
         self.T_gas = T_gas
@@ -790,14 +802,30 @@ class Grain():
         # Assumes pressures don't vary much
         Q = dt*self.k_h*self.area*(T_ambient-self.T)
         gas_released = 0
-        # With internal temperature
-        # if  (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
+
+        self.T = T_ambient
+
+        # Simplest shit, just pyrolysis
+        if T_ambient > self.T_melt:
+            self.grain_state = 1
+        if T_ambient > self.T_gas:
+            if self.grain_state == 1:
+                self.grain_state = 2
+            gas_released = Q * dt / self.h_fg
+            self.solid_mass = self.solid_mass - gas_released
+            self.thermal_mass = self.thermal_mass - gas_released
+
+
+
+
+        # With internal temperature and all steps
+        # if  (self.T+ Q/self.cp) < self.T_melt and self.solid_mass>0:
         #     self.T = self.T+ Q/(self.cp*self.thermal_mass)
-        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
+        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.solid_mass>0:
         #     self.liquid_mass += Q*dt/self.h_sf
-        #     self.thermal_mass -= Q*dt/self.h_sf
+        #     self.solid_mass -= Q*dt/self.h_sf
         #     self.grain_state = 1
-        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
+        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.solid_mass<0:
         #     self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
         # elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
         #     gas_released = Q * dt / self.h_sf
@@ -806,16 +834,19 @@ class Grain():
         # else:
         #     self.grain_state = 4
         #     gas_released = 0
-        #     # print("Grain thermal mass has runned out")
-        # if  (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
+            # print("Grain thermal mass has runned out")
+
+
+        # With external Temp and all steps
+        # if  T_ambient < self.T_melt and self.thermal_mass>0:
         #     self.T = self.T+ Q/(self.cp*self.thermal_mass)
-        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
+        # elif T_ambient < self.T_gas and self.thermal_mass>0:
         #     self.liquid_mass += Q*dt/self.h_sf
         #     self.thermal_mass -= Q*dt/self.h_sf
         #     self.grain_state = 1
-        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
+        # elif T_ambient < self.T_gas and self.thermal_mass<0:
         #     self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
-        # elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
+        # elif T_ambient > self.T_gas and self.liquid_mass > 0:
         #     gas_released = Q * dt / self.h_sf
         #     self.liquid_mass -= Q * dt / self.h_sf
         #     self.grain_state = 2
@@ -823,12 +854,19 @@ class Grain():
         #     self.grain_state = 4
         #     gas_released = 0
         #     # print("Grain thermal mass has runned out")
+
+
         return gas_released, Q
-    def setup_burn(self, output_fluid_per_mole, stoich_OF_mass, reaction_enthalpy, gas_flash_T, A_constant, E_a):
+    def setup_burn(self, output_fluid_per_mole, stoich_OF_mass, reaction_enthalpy, gas_flash_T, A_constant, E_a, ox_m_mass=0.044013, f_m_mass=0.083):
         self.flashT = gas_flash_T
         self.out_fluid_per_mole = output_fluid_per_mole
         self.stoich_OF_mass = stoich_OF_mass
         self.reaction_enthalpy = reaction_enthalpy
+        self.A_constant = A_constant
+        self.E_a = E_a
+        self.ox_molar_mass = ox_m_mass  # kg/mol for N2O
+        self.fuel_molar_mass = f_m_mass
+
 
 class Chamber():
     def __init__(self, volume, initialP, initial_fluid, initial_T=293.15, name="Unconspicuous Chamber"):
@@ -936,27 +974,98 @@ class Engine():
 
         # TO DO: SET UP ENTHALPY AND GASSES OF BURN
         # Grain burn stuff... In the long run I'll use arrhenius to find how much reacts
-        burned_fuel_mass = 0
+        # burned_fuel_mass = 0
+        #
+        # added_burn_gas = None
+        # added_burn_enthalpy = 0
+        #
+        # if self.gas_f_mass>0 and self.Chamber.T>self.Grain.flashT and self.ox_mass>0:
+        #     required_ox_mass = self.gas_f_mass * self.Grain.stoich_OF_mass
+        #
+        #     if self.ox_mass > required_ox_mass:
+        #         burned_fuel_mass = self.gas_f_mass
+        #         self.gas_f_mass = 0
+        #         self.ox_mass -= required_ox_mass
+        #     else:
+        #         burned_fuel_mass = self.ox_mass/self.Grain.stoich_OF_mass
+        #         self.ox_mass = 0
+        #         self.gas_f_mass -= burned_fuel_mass
+        #     self.Grain.grain_state = 3
+        #     print(burned_fuel_mass)
+        #     added_burn_enthalpy = self.Grain.reaction_enthalpy*burned_fuel_mass
+        #     added_burn_gas = self.Grain.out_fluid_per_mole*(1/self.Grain.out_fluid_per_mole.get_mass())
 
+        # --- ARRHENIUS GRAIN COMBUSTION MODEL (concentration-based) ---
+        burned_fuel_mass = 0.0
+        added_burn_enthalpy = 0.0
         added_burn_gas = None
-        added_burn_enthalpy = 0
+        added_burn_gas_mass = 0.0
 
-        if gas_prop_released>0 and self.Chamber.T>self.Grain.flashT:
-            required_ox_mass = self.gas_f_mass * self.Grain.stoich_OF_mass
+        # Prepare concentration logging container
+        if not hasattr(self, "Concentrations"):
+            self.Concentrations = {
+                "time": [],
+                "fuel": [],
+                "ox": [],
+                "prod": []
+            }
 
-            if self.ox_mass > required_ox_mass:
-                burned_fuel_mass = self.gas_f_mass
-                self.gas_f_mass = 0
-                self.ox_mass -= required_ox_mass
-            else:
-                burned_fuel_mass = self.ox_mass/self.Grain.stoich_OF_mass
-                self.ox_mass = 0
+        if self.gas_f_mass > 0.001 and self.ox_mass > 0 and self.Chamber.volume > 0 and self.Chamber.T > self.Grain.T_melt:
+            R_univ = 8.314462618  # J/mol*K
+            T = self.Chamber.T
+
+            # --- Arrhenius rate constant [m^3/(mol·s)] for bimolecular (a=b=1)
+            k = self.Grain.A_constant * np.exp(-self.Grain.E_a / (R_univ * T))
+            k = np.clip(k, 0.0, 1e9)  # numerical safety clamp
+            # print(k)
+
+            # --- Convert current masses to molar concentrations [mol/m^3]
+            n_fuel = self.gas_f_mass / self.Grain.fuel_molar_mass
+            n_ox = self.ox_mass / self.Grain.ox_molar_mass
+            V_ch = self.Chamber.volume
+
+            C_fuel = n_fuel / V_ch
+            C_ox = n_ox / V_ch
+
+            # --- Reaction rate [mol/(m^3·s)] (first order in both)
+            r = k * C_fuel * C_ox
+
+            # --- Moles reacted this step
+            dn = r * V_ch * dt  # mol reacted
+
+            # --- Limit by available reactants (stoichiometric)
+            nu = self.Grain.stoich_OF_mass * (self.Grain.fuel_molar_mass / self.Grain.ox_molar_mass)
+            max_dn_fuel = n_fuel
+            max_dn_ox = n_ox / nu
+            dn = min(dn, max_dn_fuel, max_dn_ox)
+
+            if dn > 0:
+                # --- Convert to mass changes
+                burned_fuel_mass = dn * self.Grain.fuel_molar_mass
+                burned_ox_mass = dn * self.Grain.ox_molar_mass * nu
+
                 self.gas_f_mass -= burned_fuel_mass
-            self.Grain.grain_state = 3
-            added_burn_enthalpy = self.Grain.reaction_enthalpy*burned_fuel_mass
-            added_burn_gas = self.Grain.out_fluid_per_mole*(1/self.Grain.out_fluid_per_mole.get_mass())
+                self.ox_mass -= burned_ox_mass
+                self.gas_f_mass = max(self.gas_f_mass, 0.0)
+                self.ox_mass = max(self.ox_mass, 0.0)
 
+                # --- Enthalpy release
+                added_burn_enthalpy = burned_fuel_mass * self.Grain.reaction_enthalpy
 
+                # --- Product formation (assuming 1 mol product per mol fuel)
+                if self.Grain.out_fluid_per_mole is not None:
+                    added_burn_gas = self.Grain.out_fluid_per_mole * dn
+                    added_burn_gas_mass = added_burn_gas.get_mass()
+
+                self.Grain.grain_state = 3
+
+            # --- Log concentrations for plotting
+            self.Concentrations["time"].append(self.Time)
+            self.Concentrations["fuel"].append(C_fuel)
+            self.Concentrations["ox"].append(C_ox)
+            self.Concentrations["prod"].append(
+                self.Concentrations["prod"][-1] + dn / V_ch if self.Concentrations["prod"] else dn / V_ch
+            )
 
         # Update values
 
@@ -983,24 +1092,18 @@ class Engine():
         n_chamber=self.Chamber.fluid.get_n()
         # cp = self.Chamber.fluid.get_cp(self.Chamber.T)*n_chamber
         cp = self._scalar_cp_mass(self.Chamber.fluid, self.Chamber.T)
-        self.Chamber.T = self.Chamber.T + (ig_heat_released+added_burn_enthalpy)/cp
-
-        # --- Update chamber pressure ---
-        R_bar = 8.314
-        R = 8.314 / self.Chamber.fluid.get_molar_mass()  # specific gas constant (J/kg·K)
-        rho = self.Chamber.mass / self.Chamber.volume
-        self.Chamber.P = np.sum(self.Chamber.fluid.get_n()) * R_bar * self.Chamber.T/self.Chamber.volume
 
         # --- Compute nozzle mass flow  ---
         R_univ = 8.314462618  # J/mol*K
         cp_molar = self.Chamber.fluid.get_cp(t=self.Chamber.T)  # [J/mol*K]
+        # print(cp_molar)
         cv_molar = cp_molar - R_univ  # [J/mol*K]
         gamma = cp_molar / cv_molar
 
         P_t = self.Chamber.P
         T_t = self.Chamber.T
         P_e = self.AmbientPressure
-        R = R_bar/self.Chamber.fluid.get_molar_mass()
+        R = R_univ / self.Chamber.fluid.get_molar_mass()
         m_dot_noz = self.Nozzle.get_m_dot(P_t, T_t, R, P_e, gamma)
         # --- Deplete chamber mass due to nozzle flow ---
         m_expelled = (m_dot_noz * dt)
@@ -1009,16 +1112,25 @@ class Engine():
         if m_expelled > self.Chamber.fluid.get_mass():
             print(" CHAMBER EMPTIED ")
             m_expelled = self.Chamber.fluid.get_mass()
+
+        chamber_unit_fluid = self.Chamber.fluid * 1 / self.Chamber.fluid.get_mass()
+        fluid_expelled = m_expelled * chamber_unit_fluid
+
+        self.Chamber.T = self.Chamber.T + (ig_heat_released+added_burn_enthalpy)/cp
+
+        # --- Update chamber pressure ---
+        R_bar = 8.314
+        R = 8.314 / self.Chamber.fluid.get_molar_mass()  # specific gas constant (J/kg·K)
+        rho = self.Chamber.mass / self.Chamber.volume
+        self.Chamber.P = np.sum(self.Chamber.fluid.get_n()) * R_bar * self.Chamber.T/self.Chamber.volume
+
+
+        # print(fluid_expelled.get_mass()/self.Chamber.fluid.get_mass())
         self.Chamber.mass -= m_expelled
-        chamber_unit_fluid = self.Chamber.fluid*1/self.Chamber.fluid.get_mass()
-        fluid_expelled = m_expelled*chamber_unit_fluid
-        print(fluid_expelled.get_mass()/self.Chamber.fluid.get_mass())
         self.Chamber.fluid = self.Chamber.fluid - fluid_expelled
         # --- Update chamber pressure again after outflow ---
         rho = max(self.Chamber.mass / self.Chamber.volume, 1e-9)
         self.Chamber.P = np.sum(self.Chamber.fluid.get_n()) * R_bar * self.Chamber.T/self.Chamber.volume
-
-
 
         self.Time += dt
     def run_ignition_sequence(self,t_start, t_end,
@@ -1043,6 +1155,8 @@ class Engine():
         """
         # --- Storage arrays ---
         self.Time = t_start
+        self.Injector.set_timing(injector_start, shutdown)
+        self.Ignitor.set_timing(ignition_start)
         times, pressures, temps, mdots, machs, grain_states, grain_ts, grain_mass, grain_liquid_mass, mdots_ox = [], [], [], [], [], [], [], [], [], []
         for step in range(int((t_end-t_start) / dt)):
             t = self.Time
@@ -1061,7 +1175,7 @@ class Engine():
             temps.append(self.Chamber.T)
             grain_states.append(self.Grain.grain_state)
             grain_ts.append(self.Grain.T)
-            grain_mass.append(self.Grain.thermal_mass)
+            grain_mass.append(self.Grain.solid_mass)
             grain_liquid_mass.append(self.Grain.liquid_mass)
             # Recompute nozzle quantities for logging
             R_univ = 8.314462618  # J/mol*K
@@ -1073,7 +1187,8 @@ class Engine():
             mdots.append(self.Nozzle.get_m_dot(self.Chamber.P, self.Chamber.T, R, self.AmbientPressure, gamma))
             mdots_ox.append(self.Injector.m_dot)
             machs.append(M_e)
-            if verbose and step % 10 == 0:
+            # if verbose and step % 10 == 0:
+            if verbose:
                 print(f"t={t:.3f}s, P={self.Chamber.P / 1e6:.3f} MPa, T={self.Chamber.T:.1f} K \n")
             if t > t_end:
                 break
@@ -1117,6 +1232,19 @@ class Engine():
         axs[7].plot(times, mdots_ox)
         axs[7].set_ylabel("Injector Mass Flow [kg/s]")
         axs[7].grid(True)
+        # --- NEW: Concentrations plot (last subplot) ---
+        if hasattr(self, "Concentrations") and len(self.Concentrations["time"]) > 0:
+            axs[8].plot(self.Concentrations["time"], self.Concentrations["fuel"], label="[Fuel]")
+            axs[8].plot(self.Concentrations["time"], self.Concentrations["ox"], label="[Ox]")
+            axs[8].plot(self.Concentrations["time"], self.Concentrations["prod"], label="[Prod]")
+            axs[8].set_ylabel("Concentration [mol/m³]")
+            axs[8].set_xlabel("Time [s]")
+            axs[8].set_title("Reactant & Product Concentrations")
+            axs[8].legend()
+            axs[8].grid(True)
+        else:
+            axs[8].text(0.5, 0.5, "No concentration data", ha='center', va='center')
+            axs[8].set_axis_off()
         # --- Vertical event lines and grain state transitions ---
         for ax in axs:
             # Core ignition/injection/shutdown events
