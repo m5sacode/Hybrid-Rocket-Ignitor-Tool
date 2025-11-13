@@ -122,7 +122,7 @@ abs_grain.setup_burn(
     stoich_OF_mass=3.99,
     reaction_enthalpy=3.68e7, #J/kg
     gas_flash_T=750.0,
-    A_constant=1e11,
+    A_constant=1e-11,
     E_a=1.2e5
 )
 

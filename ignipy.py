@@ -973,7 +973,7 @@ class Engine():
         self.gas_f_mass += gas_prop_released
 
         # TO DO: SET UP ENTHALPY AND GASSES OF BURN
-        # Grain burn stuff... In the long run I'll use arrhenius to find how much reacts
+        # # Grain burn stuff... In the long run I'll use arrhenius to find how much reacts
         # burned_fuel_mass = 0
         #
         # added_burn_gas = None
@@ -993,7 +993,77 @@ class Engine():
         #     self.Grain.grain_state = 3
         #     print(burned_fuel_mass)
         #     added_burn_enthalpy = self.Grain.reaction_enthalpy*burned_fuel_mass
-        #     added_burn_gas = self.Grain.out_fluid_per_mole*(1/self.Grain.out_fluid_per_mole.get_mass())
+        #     added_burn_gas = self.Grain.out_fluid_per_mole * (1 / self.Grain.out_fluid_per_mole.get_mass())
+
+            # Correct scaling: add product gas proportional to burned fuel mass
+            # unit_mass = self.Grain.out_fluid_per_mole.get_mass()  # mass of 1 mole product mixture
+            # scale = burned_fuel_mass / unit_mass  # number of "mole units" to add
+            # added_burn_gas = self.Grain.out_fluid_per_mole * scale
+
+        # # --- HYBRID ARRHENIUS–STOICHIOMETRIC GRAIN COMBUSTION MODEL ---
+        # burned_fuel_mass = 0.0
+        # added_burn_enthalpy = 0.0
+        # added_burn_gas = None
+        #
+        # if self.gas_f_mass > 0 and self.ox_mass > 0 and self.Chamber.volume > 0:
+        #     R_univ = 8.314462618  # J/mol·K
+        #     T = max(self.Chamber.T, 300.0)
+        #
+        #     # --- 1. Arrhenius rate constant [1/s]
+        #     k = self.Grain.A_constant * np.exp(-self.Grain.E_a / (R_univ * T))
+        #     if not np.isfinite(k) or k < 0:
+        #         k = 0.0
+        #
+        #     # --- 2. Compute concentrations [mol/m³]
+        #     n_fuel = self.gas_f_mass / self.Grain.fuel_molar_mass
+        #     n_ox = self.ox_mass / self.Grain.ox_molar_mass
+        #     V_ch = self.Chamber.volume
+        #
+        #     C_fuel = n_fuel / V_ch
+        #     C_ox = n_ox / V_ch
+        #
+        #     # --- 3. Reaction rate [mol/(m³·s)], assume first-order in each
+        #     r = k * C_fuel * C_ox
+        #
+        #     # --- 4. Moles reacted during timestep
+        #     dn = r * V_ch * dt  # mol reacted in this step
+        #
+        #     # --- 5. Limit by available reactants (stoichiometry)
+        #     # Convert stoich ratio (mass basis) to molar ratio
+        #     nu = self.Grain.stoich_OF_mass * (self.Grain.fuel_molar_mass / self.Grain.ox_molar_mass)
+        #     max_dn_fuel = n_fuel
+        #     max_dn_ox = n_ox / nu
+        #     dn = min(dn, max_dn_fuel, max_dn_ox)
+        #
+        #     # --- 6. Convert reacted moles -> masses
+        #     burned_fuel_mass = dn * self.Grain.fuel_molar_mass
+        #     burned_ox_mass = dn * self.Grain.ox_molar_mass * nu
+        #
+        #     # --- 7. Update mass inventories
+        #     self.gas_f_mass = max(self.gas_f_mass - burned_fuel_mass, 0.0)
+        #     self.ox_mass = max(self.ox_mass - burned_ox_mass, 0.0)
+        #
+        #     # --- 8. Enthalpy release (per kg of fuel)
+        #     added_burn_enthalpy = burned_fuel_mass * self.Grain.reaction_enthalpy
+        #
+        #     # --- 9. Add combustion products, scaled properly
+        #     # out_fluid_per_mole is per 1 mol of burned fuel
+        #     if self.Grain.out_fluid_per_mole is not None:
+        #         added_burn_gas = self.Grain.out_fluid_per_mole * dn
+        #
+        #     # --- 10. Update grain state
+        #     if burned_fuel_mass > 0:
+        #         self.Grain.grain_state = 3
+        #
+        #     # --- 11. Store concentrations for plotting
+        #     if not hasattr(self, "Concentrations"):
+        #         self.Concentrations = {"time": [], "fuel": [], "ox": [], "prod": []}
+        #
+        #     self.Concentrations["time"].append(self.Time)
+        #     self.Concentrations["fuel"].append(C_fuel)
+        #     self.Concentrations["ox"].append(C_ox)
+        #     prod_prev = self.Concentrations["prod"][-1] if self.Concentrations["prod"] else 0.0
+        #     self.Concentrations["prod"].append(prod_prev + dn / V_ch)
 
         # --- ARRHENIUS GRAIN COMBUSTION MODEL (concentration-based) ---
         burned_fuel_mass = 0.0
@@ -1010,7 +1080,7 @@ class Engine():
                 "prod": []
             }
 
-        if self.gas_f_mass > 0.001 and self.ox_mass > 0 and self.Chamber.volume > 0 and self.Chamber.T > self.Grain.T_melt:
+        if self.Grain.grain_state>1 and self.ox_mass > 0 and self.Chamber.volume > 0 and self.Chamber.T > self.Grain.T_melt:
             R_univ = 8.314462618  # J/mol*K
             T = self.Chamber.T
 
