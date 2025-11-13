@@ -52,7 +52,7 @@ nozzle = ip.Nozzle(throat_area, chamber_area, exit_area)
 
 # -------- INJECTOR STUFF ----------
 
-Cd = 0.5974
+Cd = 0.735
 Manifold_pressure = 30*100000 # Pa
 total_area = 0.000004155 # m^2
 manifoldT = 233.15 # K
@@ -63,7 +63,7 @@ injector = ip.Injector(Cd, Manifold_pressure, fluid1kg,total_area, manifoldT, na
 
 # -------- GRAIN STUFF ----------
 
-grain_mass = 0.01*50/1000 #kg
+grain_mass = 0.1*50/1000 #kg
 grain_area = np.pi * (30/2000)**2 * 110/1000
 
 # ---------- FDM (3D-printed) ABS ----------
@@ -74,7 +74,7 @@ abs_grain = ip.Grain(
     cp_gas=1000.0,
     h_fg=3.070e6,                        # J/kg (measured enthalpy of gasification, FDM ABS). :contentReference[oaicite:8]{index=8}
     h_sf=0.0,
-    heat_transfer_coefficient=10000000.0,     #W/m2K
+    heat_transfer_coefficient=100.0,     #W/m2K
     T_melt=378.0,
     T_gas=673.0,
     initial_T=293.15,
@@ -121,4 +121,4 @@ ignitor.set_timing(ignition)
 
 # -------- RUN ----------
 
-ChimeraMk2.run_ignition_sequence(ignition-0.1, 0.55, ignition, mv_open, 1)
+ChimeraMk2.run_ignition_sequence(ignition-0.1, 1, ignition, mv_open, 1)

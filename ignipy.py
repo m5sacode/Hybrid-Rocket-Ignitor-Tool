@@ -516,11 +516,11 @@ class Nozzle():
         A_over_Astar = self._A_over_Astar(M, gamma)
         A_star = A/A_over_Astar
         return A_star
-    def get_M_throat(self, P_t, P_e, gamma, R_bar):
+    def get_M_throat(self, P_t, P_e, gamma, R):
         """
         Return throat Mach number.
         """
-        self.R_bar = R_bar
+        self.R = R
         M_e = self.get_M_e_opt(gamma, P_t, P_e)
         A_star = self.get_A_star(self.A_exit, gamma, M_e)
         # print(self.A_throat/ A_star)
@@ -530,40 +530,41 @@ class Nozzle():
             M_throat = self.mach_from_area_ratio(self.A_throat/ A_star, gamma)
         # print(M_throat)
         return M_throat
-    def get_m_dot(self, P_t, T_t, R_bar, P_e, gamma):
+
+    def get_m_dot(self, P_t, T_t, R, P_e, gamma):
         """
         Compute mass flow rate through the throat.
+        Assumes isentropic flow. Returns mass flow rate (kg/s).
         """
-        crit_ratio = (2 / (gamma + 1)) ** (gamma / (gamma - 1))
-        P_crit = crit_ratio * P_t
         self.gamma = gamma
-        self.R_bar = R_bar
-
-        # Compute Mach numbers
+        # print("Gamma: ", gamma)
+        self.R = R
+        # Mach at exit (for diagnostics)
         self.Me = self.get_M_e_opt(gamma, P_t, P_e)
         try:
-            self.M_throat = self.get_M_throat(P_t, P_e, self.gamma, self.R_bar)
+            self.M_throat = self.get_M_throat(P_t, P_e, gamma, R)
         except Exception:
             self.M_throat = 1
 
-        # --- Mass flow formula
         if self.M_throat < 1:
             M = self.M_throat
-            m_dot = ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * M * (
-                        1 + (self.gamma - 1) / 2 * M ** 2) ** (-(self.gamma + 1) / (2 * (self.gamma - 1)))
-
+            term = (1 + (gamma - 1) / 2 * M ** 2)
+            m_dot = (self.A_throat * P_t / np.sqrt(T_t)) * np.sqrt(gamma / R) * M * term ** (
+                        -(gamma + 1) / (2 * (gamma - 1)))
         else:
-            M = 1
-            m_dot= ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * (((gamma+1)/2)**((gamma+1)/(2-2*gamma)))
+            # Choked flow (Mach=1)
+            # print("Choked flow")
+            m_dot = (self.A_throat * P_t / np.sqrt(T_t)) * np.sqrt(gamma / R) * (2 / (gamma + 1)) ** (
+                        (gamma + 1) / (2 * (gamma - 1)))
 
-        # print(m_dot)
         self.m_dot = m_dot
         return m_dot
+
     def get_M_e_opt(self, gamma, P_t, P_e):
         self.gamma = gamma
         M_e_opt = np.sqrt((2 / (gamma - 1)) * ((P_t / P_e) ** ((gamma - 1) / gamma) - 1))
         return M_e_opt
-    def plot_nozzle_performance_vs_chamber(self, P_e, T_t, R_bar, gamma, P_t_range):
+    def plot_nozzle_performance_vs_chamber(self, P_e, T_t, R, gamma, P_t_range):
         """
         Plot Mach number (throat & exit) and mass flow vs chamber (stagnation) pressure.
 
@@ -581,7 +582,7 @@ class Nozzle():
             Range of chamber pressures [Pa] to evaluate
         """
         self.gamma = gamma
-        self.R_bar = R_bar
+        self.R = R
         M_e_list = []
         M_t_list = []
         m_dot_list = []
@@ -593,7 +594,7 @@ class Nozzle():
 
             # Throat Mach (subsonic branch before choking)
             try:
-                M_t = self.get_M_throat(P_t, P_e, gamma, R_bar)
+                M_t = self.get_M_throat(P_t, P_e, gamma, R)
             except Exception:
                 M_t = np.nan
 
@@ -604,7 +605,7 @@ class Nozzle():
 
             # Mass flow rate at throat
 
-            m_dot = self.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+            m_dot = self.get_m_dot(P_t, T_t, R, P_e, gamma)
 
 
             M_e_list.append(M_e)
@@ -634,7 +635,7 @@ class Nozzle():
         plt.title(f"Nozzle Performance vs Chamber Pressure — {self.name}")
         plt.tight_layout()
         plt.show()
-    def plot_nozzle_performance_vs_exit(self, P_t, T_t, R_bar, gamma, P_e_range):
+    def plot_nozzle_performance_vs_exit(self, P_t, T_t, R, gamma, P_e_range):
         """
         Plot Mach number (throat & exit) and mass flow vs exit pressure.
 
@@ -652,7 +653,7 @@ class Nozzle():
             Range of exit/ambient pressures [Pa] to evaluate
         """
         self.gamma = gamma
-        self.R_bar = R_bar
+        self.R = R
         M_e_list = []
         M_t_list = []
         m_dot_list = []
@@ -664,7 +665,7 @@ class Nozzle():
 
             # Throat Mach (subsonic branch before choking)
             try:
-                M_t = self.get_M_throat(P_t, P_e, gamma, R_bar)
+                M_t = self.get_M_throat(P_t, P_e, gamma, R)
             except Exception:
                 M_t = np.nan
 
@@ -674,7 +675,7 @@ class Nozzle():
                 M_e = np.nan
 
             # Mass flow rate at throat
-            m_dot = self.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+            m_dot = self.get_m_dot(P_t, T_t, R, P_e, gamma)
 
             M_e_list.append(M_e)
             M_t_list.append(M_t)
@@ -789,22 +790,39 @@ class Grain():
         # Assumes pressures don't vary much
         Q = dt*self.k_h*self.area*(T_ambient-self.T)
         gas_released = 0
-        if  (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
-            self.T = self.T+ Q/(self.cp*self.thermal_mass)
-        elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
-            self.liquid_mass += Q*dt/self.h_sf
-            self.thermal_mass -= Q*dt/self.h_sf
-            self.grain_state = 1
-        elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
-            self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
-        elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
-            gas_released = Q * dt / self.h_sf
-            self.liquid_mass -= Q * dt / self.h_sf
-            self.grain_state = 2
-        else:
-            self.grain_state = 4
-            gas_released = 0
-            # print("Grain thermal mass has runned out")
+        # With internal temperature
+        # if  (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
+        #     self.T = self.T+ Q/(self.cp*self.thermal_mass)
+        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
+        #     self.liquid_mass += Q*dt/self.h_sf
+        #     self.thermal_mass -= Q*dt/self.h_sf
+        #     self.grain_state = 1
+        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
+        #     self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
+        # elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
+        #     gas_released = Q * dt / self.h_sf
+        #     self.liquid_mass -= Q * dt / self.h_sf
+        #     self.grain_state = 2
+        # else:
+        #     self.grain_state = 4
+        #     gas_released = 0
+        #     # print("Grain thermal mass has runned out")
+        # if  (self.T+ Q/self.cp) < self.T_melt and self.thermal_mass>0:
+        #     self.T = self.T+ Q/(self.cp*self.thermal_mass)
+        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
+        #     self.liquid_mass += Q*dt/self.h_sf
+        #     self.thermal_mass -= Q*dt/self.h_sf
+        #     self.grain_state = 1
+        # elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
+        #     self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
+        # elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
+        #     gas_released = Q * dt / self.h_sf
+        #     self.liquid_mass -= Q * dt / self.h_sf
+        #     self.grain_state = 2
+        # else:
+        #     self.grain_state = 4
+        #     gas_released = 0
+        #     # print("Grain thermal mass has runned out")
         return gas_released, Q
     def setup_burn(self, output_fluid_per_mole, stoich_OF_mass, reaction_enthalpy, gas_flash_T, A_constant, E_a):
         self.flashT = gas_flash_T
@@ -973,21 +991,28 @@ class Engine():
         rho = self.Chamber.mass / self.Chamber.volume
         self.Chamber.P = np.sum(self.Chamber.fluid.get_n()) * R_bar * self.Chamber.T/self.Chamber.volume
 
-        # --- Compute nozzle mass flow and thrust ---
-        gamma = self.Chamber.fluid.get_cp(t=self.Chamber.T) / ( self.Chamber.fluid.get_cp(t=self.Chamber.T) - self.Chamber.fluid.get_molar_mass()/self.Chamber.fluid.get_mass() * 0 )
+        # --- Compute nozzle mass flow  ---
+        R_univ = 8.314462618  # J/mol*K
+        cp_molar = self.Chamber.fluid.get_cp(t=self.Chamber.T)  # [J/mol*K]
+        cv_molar = cp_molar - R_univ  # [J/mol*K]
+        gamma = cp_molar / cv_molar
+
         P_t = self.Chamber.P
         T_t = self.Chamber.T
         P_e = self.AmbientPressure
-        m_dot_noz = self.Nozzle.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
+        R = R_bar/self.Chamber.fluid.get_molar_mass()
+        m_dot_noz = self.Nozzle.get_m_dot(P_t, T_t, R, P_e, gamma)
         # --- Deplete chamber mass due to nozzle flow ---
         m_expelled = (m_dot_noz * dt)
         # print("C mass: ", self.Chamber.mass)
         # print("Mass expelled: ", m_expelled)
-        if m_expelled > self.Chamber.mass:
-            m_expelled = self.Chamber.mass
+        if m_expelled > self.Chamber.fluid.get_mass():
+            print(" CHAMBER EMPTIED ")
+            m_expelled = self.Chamber.fluid.get_mass()
         self.Chamber.mass -= m_expelled
-        chamber_unit_fluid = self.Chamber.fluid/self.Chamber.fluid.get_mass()
+        chamber_unit_fluid = self.Chamber.fluid*1/self.Chamber.fluid.get_mass()
         fluid_expelled = m_expelled*chamber_unit_fluid
+        print(fluid_expelled.get_mass()/self.Chamber.fluid.get_mass())
         self.Chamber.fluid = self.Chamber.fluid - fluid_expelled
         # --- Update chamber pressure again after outflow ---
         rho = max(self.Chamber.mass / self.Chamber.volume, 1e-9)
@@ -1039,11 +1064,13 @@ class Engine():
             grain_mass.append(self.Grain.thermal_mass)
             grain_liquid_mass.append(self.Grain.liquid_mass)
             # Recompute nozzle quantities for logging
-            gamma = self.Chamber.fluid.get_cp(t=self.Chamber.T) / (self.Chamber.fluid.get_cp(
-                t=self.Chamber.T) - self.Chamber.fluid.get_molar_mass() / self.Chamber.fluid.get_mass() * 0)
-            R_bar = 8.314 / self.Chamber.fluid.get_molar_mass()  # specific gas constant (J/kg·K)
-            M_e = self.Nozzle.get_M_throat(self.Chamber.P, self.AmbientPressure, gamma, R_bar)
-            mdots.append(self.Nozzle.get_m_dot(self.Chamber.P, self.Chamber.T, R_bar, self.AmbientPressure, gamma))
+            R_univ = 8.314462618  # J/mol*K
+            cp_molar = self.Chamber.fluid.get_cp(t=self.Chamber.T)  # [J/mol*K]
+            cv_molar = cp_molar - R_univ  # [J/mol*K]
+            gamma = cp_molar / cv_molar
+            R = 8.314 / self.Chamber.fluid.get_molar_mass()  # specific gas constant (J/kg·K)
+            M_e = self.Nozzle.get_M_throat(self.Chamber.P, self.AmbientPressure, gamma, R)
+            mdots.append(self.Nozzle.get_m_dot(self.Chamber.P, self.Chamber.T, R, self.AmbientPressure, gamma))
             mdots_ox.append(self.Injector.m_dot)
             machs.append(M_e)
             if verbose and step % 10 == 0:
@@ -1184,7 +1211,7 @@ class Engine():
 # print(ign.get_H_dot(np.pi/2))   # power
 
 # Nozzle testing code
-
+#
 # gamma = 1.4
 # R = 287
 # P_e = 101325       # ambient pressure [Pa]
