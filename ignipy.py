@@ -556,7 +556,7 @@ class Nozzle():
             M = 1
             m_dot= ((self.A_throat * P_t) / np.sqrt(T_t)) * np.sqrt(self.gamma / self.R_bar) * (((gamma+1)/2)**((gamma+1)/(2-2*gamma)))
 
-        print(m_dot)
+        # print(m_dot)
         self.m_dot = m_dot
         return m_dot
     def get_M_e_opt(self, gamma, P_t, P_e):
@@ -715,30 +715,55 @@ class Injector():
         self.total_Area = total_Area
         self.fluid = Fluid_1kg
         self.name = name
+        self.m_dot = 0
     def get_choked_massflow(self, T):
-        Cp = self.fluid.get_cp(t=T)
-        Cv = Cp - 8.314
-        gamma = Cp/Cv
-        rho = self.fluid.get_density(t=T, p=self.ManifoldPressure)
-        gammafunction = (2/(gamma+1))**((gamma+1)/(gamma-1))
-        self.choked_massflow = self.Cd*self.total_Area*np.sqrt(gamma*rho*self.ManifoldPressure*gammafunction)
+        """
+        Compute the choked mass flow at a given fluid temperature T [K].
+        Uses Gaspype for Cp, Cv, and density. Handles multi-species fluids safely.
+        """
+        try:
+            # Number of moles in the fluid
+            n = self.fluid.get_n()
+
+            # Cp and Cv per mole
+            Cp_mol = self.fluid.get_cp(t=T)  # J/mol·K
+            Cv_mol = Cp_mol - 8.314  # J/mol·K
+
+            # Specific heat ratio
+            gamma = Cp_mol / Cv_mol
+
+            # Density at T and manifold pressure
+            rho = self.fluid.get_density(t=T, p=self.ManifoldPressure)  # kg/m³
+
+            # Choked flow factor
+            gamma_function = (2 / (gamma + 1)) ** ((gamma + 1) / (gamma - 1))
+
+            # Choked mass flow (kg/s)
+            self.choked_massflow = self.Cd * self.total_Area * np.sqrt(
+                gamma * rho * self.ManifoldPressure * gamma_function)
+
+        except Exception as e:
+            print(f"[WARNING] Failed to compute choked mass flow: {e}")
+            self.choked_massflow = 0.0
+
         return self.choked_massflow
+
     def get_massflow(self, ChamberPressure, T):
         rho = self.fluid.get_density(t=T, p=self.ManifoldPressure)
         pressure_delta = self.ManifoldPressure - ChamberPressure
-        m_dot=self.Cd*self.total_Area*np.sqrt(2*rho*pressure_delta)
+        self.m_dot=self.Cd*self.total_Area*np.sqrt(2*rho*pressure_delta)
         choked_m_dot = self.get_choked_massflow(T)
-        if m_dot > choked_m_dot:
+        if self.m_dot > choked_m_dot:
             m_dot = choked_m_dot
-            print("choked flow reached at injector")
-        return m_dot
+            # print("choked flow reached at injector")
+        return self.m_dot
     def set_timing(self, valve_open):
         self.valve_open_t = valve_open
     def update(self, t, dt, chamber_P):
         T = self.ManifoldT
         if t>self.valve_open_t:
-            m_dot = self.get_massflow(chamber_P, T)
-            m_added = m_dot*dt
+            self.m_dot = self.get_massflow(chamber_P, T)
+            m_added = self.m_dot*dt
             fluid_added = self.fluid*m_added
         else:
             m_added, fluid_added, T = 0, None, T
@@ -759,7 +784,7 @@ class Grain():
         self.h_sf = h_sf
         self.T_gas = T_gas
         self.cp_gas = cp_gas
-
+        self.grain_state = 0 # 0 is solid, 1 is melting, 2 is gassing, 3 is burning, 4 is burned
     def update(self, dt, T_ambient):
         # Assumes pressures don't vary much
         Q = dt*self.k_h*self.area*(T_ambient-self.T)
@@ -769,14 +794,17 @@ class Grain():
         elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass>0:
             self.liquid_mass += Q*dt/self.h_sf
             self.thermal_mass -= Q*dt/self.h_sf
+            self.grain_state = 1
         elif self.T+ Q/(self.cp*self.thermal_mass) < self.T_gas and self.thermal_mass<0:
             self.T = self.T + Q / (self.cp_gas * self.liquid_mass)
         elif self.T+ Q/(self.cp*self.thermal_mass) > self.T_gas and self.liquid_mass > 0:
             gas_released = Q * dt / self.h_sf
             self.liquid_mass -= Q * dt / self.h_sf
+            self.grain_state = 2
         else:
+            self.grain_state = 4
             gas_released = 0
-            print("Grain thermal mass has runned out")
+            # print("Grain thermal mass has runned out")
         return gas_released, Q
     def setup_burn(self, output_fluid_per_mole, stoich_OF_mass, reaction_enthalpy, gas_flash_T, A_constant, E_a):
         self.flashT = gas_flash_T
@@ -805,6 +833,75 @@ class Engine():
         self.ox_mass = 0
         self.gas_f_mass = 0
 
+    def _scalar_cp_mass(self, fluid, T):
+        """
+        Return a scalar mass-based specific heat capacity [J/kg/K] for `fluid` at temperature T.
+
+        This function:
+          - coerces T to a float robustly,
+          - safely calls fluid.get_cp(T) (which may return ndarray or scalar, in J/mol/K),
+          - converts molar Cp -> mass Cp via molar mass (kg/mol),
+          - falls back gracefully if an array is returned.
+        """
+        import numpy as _np
+
+        # 1) Make T a plain float (handle arrays, lists, etc.)
+        try:
+            T_scalar = float(_np.asarray(T).flat[0])
+        except Exception:
+            # As a last resort, use current chamber T if available
+            try:
+                T_scalar = float(self.Chamber.T)
+            except Exception:
+                T_scalar = 300.0  # reasonable default
+
+        # 2) Ask gaspype for molar Cp (J/mol/K) at scalar T
+        try:
+            cp_molar = fluid.get_cp(T_scalar)
+        except Exception as e:
+            # If gaspype errors (out-of-range), clamp T to a safer value
+            # Try using median of fluid temp grid if available, else fallback
+            try:
+                # Many gas libs expose T limits; try crude fallback:
+                cp_molar = fluid.get_cp(max(200.0, min(5000.0, T_scalar)))
+            except Exception:
+                # give up and return a default cp_mass
+                return 1000.0  # J/kg/K fallback (survivable default)
+
+        cp_molar = _np.asarray(cp_molar)
+
+        # 3) If cp_molar is an array, try to collapse it to a scalar (weighted average)
+        if cp_molar.size > 1:
+            try:
+                # If fluid.get_n() returns array of molar amounts/fractions, use it to weight cp
+                n = _np.asarray(fluid.get_n())
+                # If n is scalar but cp array, fall back to mean
+                if _np.ndim(n) == 0 or n.size == 1:
+                    cp_molar_scalar = float(cp_molar.mean())
+                else:
+                    # If n and cp_molar align, weight them
+                    # If n are molar amounts, sum-weight; if fractions, normalize first
+                    n_sum = n.sum()
+                    if n_sum == 0:
+                        cp_molar_scalar = float(cp_molar.mean())
+                    else:
+                        cp_molar_scalar = float((cp_molar * n).sum() / n_sum)
+            except Exception:
+                cp_molar_scalar = float(cp_molar.mean())
+        else:
+            cp_molar_scalar = float(cp_molar)
+
+        # 4) Convert molar Cp (J/mol/K) to mass Cp (J/kg/K)
+        try:
+            molar_mass = float(fluid.get_molar_mass())  # kg/mol
+            if molar_mass == 0:
+                return 1000.0
+            cp_mass = cp_molar_scalar / molar_mass
+        except Exception:
+            # If get_molar_mass fails, fallback to dividing by 0.029 (approx air)
+            cp_mass = cp_molar_scalar / 0.029
+
+        return cp_mass
     def update(self, dt):
 
         # Ignitor stuff
@@ -837,6 +934,7 @@ class Engine():
                 burned_fuel_mass = self.ox_mass/self.Grain.stoich_OF_mass
                 self.ox_mass = 0
                 self.gas_f_mass -= burned_fuel_mass
+            self.Grain.grain_state = 3
             added_burn_enthalpy = self.Grain.reaction_enthalpy*burned_fuel_mass
             added_burn_gas = self.Grain.out_fluid_per_mole*(1/self.Grain.out_fluid_per_mole.get_mass())
 
@@ -846,11 +944,13 @@ class Engine():
 
         if in_fluid_added is not None:
             n_chamber = self.Chamber.fluid.get_n()
-            cp1 = self.Chamber.fluid.get_cp(self.Chamber.T) * n_chamber
+            # cp1 = self.Chamber.fluid.get_cp(self.Chamber.T) * n_chamber
+            cp1 = self._scalar_cp_mass(self.Chamber.fluid, self.Chamber.T)
             m1 = self.Chamber.mass
             m2 = in_m_added
             n_injector = in_fluid_added.get_n()
-            cp2 = in_fluid_added.get_cp(in_T) * n_injector
+            # cp2 = in_fluid_added.get_cp(in_T) * n_injector
+            cp2 = self._scalar_cp_mass(in_fluid_added, in_T)
             self.Chamber.fluid  = self.Chamber.fluid + in_fluid_added
             T1 = self.Chamber.T
             T2 = in_T
@@ -863,44 +963,48 @@ class Engine():
             self.Chamber.fluid = self.Chamber.fluid + added_burn_gas
 
         n_chamber=self.Chamber.fluid.get_n()
-        cp = self.Chamber.fluid.get_cp(self.Chamber.T)*n_chamber
+        # cp = self.Chamber.fluid.get_cp(self.Chamber.T)*n_chamber
+        cp = self._scalar_cp_mass(self.Chamber.fluid, self.Chamber.T)
         self.Chamber.T = self.Chamber.T + (ig_heat_released+added_burn_enthalpy)/cp
 
         # --- Update chamber pressure ---
-        R_bar = self.Chamber.fluid.get_R()  # specific gas constant (J/kg·K)
-        rho = self.Chamber.mass / self.Chamber.V
-        self.Chamber.P = rho * R_bar * self.Chamber.T
+        R_bar = 8.314
+        R = 8.314 / self.Chamber.fluid.get_molar_mass()  # specific gas constant (J/kg·K)
+        rho = self.Chamber.mass / self.Chamber.volume
+        self.Chamber.P = np.sum(self.Chamber.fluid.get_n()) * R_bar * self.Chamber.T/self.Chamber.volume
 
         # --- Compute nozzle mass flow and thrust ---
-        gamma = self.Chamber.fluid.get_gamma(self.Chamber.T)
+        gamma = self.Chamber.fluid.get_cp(t=self.Chamber.T) / ( self.Chamber.fluid.get_cp(t=self.Chamber.T) - self.Chamber.fluid.get_molar_mass()/self.Chamber.fluid.get_mass() * 0 )
         P_t = self.Chamber.P
         T_t = self.Chamber.T
         P_e = self.AmbientPressure
         m_dot_noz = self.Nozzle.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
-
         # --- Deplete chamber mass due to nozzle flow ---
-        m_expelled = m_dot_noz * dt
-        m_expelled = min(m_expelled, self.Chamber.mass)
+        m_expelled = (m_dot_noz * dt)
+        # print("C mass: ", self.Chamber.mass)
+        # print("Mass expelled: ", m_expelled)
+        if m_expelled > self.Chamber.mass:
+            m_expelled = self.Chamber.mass
         self.Chamber.mass -= m_expelled
-
+        chamber_unit_fluid = self.Chamber.fluid/self.Chamber.fluid.get_mass()
+        fluid_expelled = m_expelled*chamber_unit_fluid
+        self.Chamber.fluid = self.Chamber.fluid - fluid_expelled
         # --- Update chamber pressure again after outflow ---
-        rho = max(self.Chamber.mass / self.Chamber.V, 1e-9)
-        self.Chamber.P = rho * R_bar * self.Chamber.T
+        rho = max(self.Chamber.mass / self.Chamber.volume, 1e-9)
+        self.Chamber.P = np.sum(self.Chamber.fluid.get_n()) * R_bar * self.Chamber.T/self.Chamber.volume
 
 
 
         self.Time += dt
-
-    def run_ignition_sequence(self, t_end=5.0, dt=1e-3,
-                              ignition_start=0.2, injector_start=0.3,
-                              grain_ignite=0.35, shutdown=4.0,
-                              verbose=False):
+    def run_ignition_sequence(self,t_start, t_end,
+                              ignition_start, injector_start, shutdown, dt=1e-3,
+                              verbose=True):
         """
         Simulate a full ignition sequence for the self object.
         Parameters
         ----------
-        engine : Engine
-            Initialized Engine object (with Ignitor, Injector, etc.)
+        t_start : float
+            End time of simulation [s].
         t_end : float
             End time of simulation [s].
         dt : float
@@ -913,67 +1017,120 @@ class Engine():
             Dictionary with time history of key variables.
         """
         # --- Storage arrays ---
-        times, pressures, temps, mdots, machs = [], [], [], [], []
-        for step in range(int(t_end / dt)):
+        self.Time = t_start
+        times, pressures, temps, mdots, machs, grain_states, grain_ts, grain_mass, grain_liquid_mass, mdots_ox = [], [], [], [], [], [], [], [], [], []
+        for step in range(int((t_end-t_start) / dt)):
             t = self.Time
             # Example: turn on subsystems at event times
             if hasattr(self.Ignitor, "active"):
                 self.Ignitor.active = t >= ignition_start
             if hasattr(self.Injector, "active"):
                 self.Injector.active = t >= injector_start
-            if hasattr(self.Grain, "ignited"):
-                self.Grain.ignited = t >= grain_ignite
+            # if hasattr(self.Grain, "ignited"):
+            #     self.Grain.ignited = t >= grain_ignite
             # --- Run self update ---
             self.update(dt)
             # --- Record ---
             times.append(self.Time)
             pressures.append(self.Chamber.P)
             temps.append(self.Chamber.T)
+            grain_states.append(self.Grain.grain_state)
+            grain_ts.append(self.Grain.T)
+            grain_mass.append(self.Grain.thermal_mass)
+            grain_liquid_mass.append(self.Grain.liquid_mass)
             # Recompute nozzle quantities for logging
-            gamma = self.Chamber.fluid.get_gamma(self.Chamber.T)
-            R_bar = self.Chamber.fluid.get_R()
-            P_t = self.Chamber.P
-            T_t = self.Chamber.T
-            P_e = self.AmbientPressure
-            m_dot = self.Nozzle.get_m_dot(P_t, T_t, R_bar, P_e, gamma)
-            mdots.append(m_dot)
-            # nozzle exit Mach (approx)
-            try:
-                A_ratio = self.Nozzle.A_exit / self.Nozzle.A_throat
-                M_e = self.Nozzle.mach_from_area_ratio(A_ratio, gamma, supersonic=True)
-            except Exception:
-                M_e = np.nan
+            gamma = self.Chamber.fluid.get_cp(t=self.Chamber.T) / (self.Chamber.fluid.get_cp(
+                t=self.Chamber.T) - self.Chamber.fluid.get_molar_mass() / self.Chamber.fluid.get_mass() * 0)
+            R_bar = 8.314 / self.Chamber.fluid.get_molar_mass()  # specific gas constant (J/kg·K)
+            M_e = self.Nozzle.get_M_throat(self.Chamber.P, self.AmbientPressure, gamma, R_bar)
+            mdots.append(self.Nozzle.get_m_dot(self.Chamber.P, self.Chamber.T, R_bar, self.AmbientPressure, gamma))
+            mdots_ox.append(self.Injector.m_dot)
             machs.append(M_e)
-            if verbose and step % 500 == 0:
-                print(f"t={t:.3f}s, P={self.Chamber.P / 1e6:.3f} MPa, T={self.Chamber.T:.1f} K")
+            if verbose and step % 10 == 0:
+                print(f"t={t:.3f}s, P={self.Chamber.P / 1e6:.3f} MPa, T={self.Chamber.T:.1f} K \n")
             if t > t_end:
                 break
-        # --- Plot results ---
-        fig, axs = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
-        axs[0].plot(times, np.array(pressures) / 1e6)
-        axs[0].set_ylabel("Chamber Pressure [MPa]")
+            # --- Plot results (2 columns × 3 rows) ---
+        fig, axs = plt.subplots(3, 3, figsize=(30, 12), sharex=True)
+        axs = axs.flatten()
+
+        axs[0].plot(times, np.array(pressures) / 1e5)
+        axs[0].set_ylabel("Chamber Pressure [bar]")
         axs[0].grid(True)
+
         axs[1].plot(times, temps)
         axs[1].set_ylabel("Chamber Temperature [K]")
         axs[1].grid(True)
+
         axs[2].plot(times, mdots)
         axs[2].set_ylabel("Nozzle Mass Flow [kg/s]")
         axs[2].grid(True)
+
         axs[3].plot(times, machs)
-        axs[3].set_ylabel("Nozzle Exit Mach")
-        axs[3].set_xlabel("Time [s]")
+        axs[3].set_ylabel("Nozzle Throat Mach")
         axs[3].grid(True)
-        # --- Vertical event lines ---
+
+        axs[4].plot(times, grain_ts)
+        axs[4].set_ylabel("Grain Temperature [K]")
+        axs[4].grid(True)
+
+        axs[5].step(times, grain_states, where="post")
+        axs[5].set_ylabel("Grain State")
+        axs[5].set_xlabel("Time [s]")
+        axs[5].set_yticks([0, 1, 2, 3, 4])
+        axs[5].set_yticklabels(["Solid", "Melting", "Gassing", "Burning", "Burned"])
+        axs[5].grid(True)
+
+        axs[6].plot(times, grain_mass, label="Total Grain Mass")
+        axs[6].plot(times, grain_liquid_mass, label="Liquid Grain Mass")
+        axs[6].set_ylabel("Grain Mass [kg]")
+        axs[6].grid(True)
+        axs[6].legend()
+
+        axs[7].plot(times, mdots_ox)
+        axs[7].set_ylabel("Injector Mass Flow [kg/s]")
+        axs[7].grid(True)
+        # --- Vertical event lines and grain state transitions ---
         for ax in axs:
+            # Core ignition/injection/shutdown events
             for ev_time, label in [
                 (ignition_start, "Ignitor ON"),
-                (injector_start, "Injector ON"),
-                (grain_ignite, "Grain Ignition"),
+                (injector_start, "Main Valve ON"),
                 (shutdown, "Shutdown")
             ]:
                 ax.axvline(ev_time, color='r', linestyle='--', alpha=0.7)
                 ax.text(ev_time, ax.get_ylim()[1] * 0.95, label, rotation=90,
                         va='top', ha='right', fontsize=8, color='r')
+
+            # --- Grain state transitions ---
+            grain_colors = {
+                (0, 1): "black",
+                (1, 2): "orange",
+                (2, 3): "red",
+                (3, 4): "blue"
+            }
+            grain_labels = {
+                (0, 1): "Melting start",
+                (1, 2): "Gassing start",
+                (2, 3): "Burning start",
+                (3, 4): "Burnout"
+            }
+
+            # detect transitions in grain_states
+            if len(grain_states) > 1:
+                for i in range(1, len(grain_states)):
+                    prev_state = grain_states[i - 1]
+                    curr_state = grain_states[i]
+                    transition = (prev_state, curr_state)
+                    if transition in grain_colors:
+                        color = grain_colors[transition]
+                        label = grain_labels[transition]
+                        t_transition = times[i]
+                        ax.axvline(t_transition, color=color, linestyle='--', alpha=0.8, linewidth=2)
+                        ax.text(
+                            t_transition, ax.get_ylim()[1] * 0.9, label,
+                            rotation=90, va='top', ha='right', fontsize=8, color=color
+                        )
         plt.tight_layout()
         plt.show()
         # --- Return results for post-processing ---

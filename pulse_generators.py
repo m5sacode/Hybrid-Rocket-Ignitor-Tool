@@ -57,15 +57,15 @@ def smooth_pulse(
 
 
 # Example usage
-x = np.linspace(0, 2, 2000)
-y = smooth_pulse(x, duration=2.0, rise_time=0.7, fall_time=0.7, area=2.0)
-
-plt.plot(x, y)
-plt.title("Smooth Pulse with Controlled Area, Duration, Rise/Fall")
-plt.xlabel("Time")
-plt.ylabel("Amplitude")
-plt.grid(True)
-plt.show()
+# x = np.linspace(0, 2, 2000)
+# y = smooth_pulse(x, duration=2.0, rise_time=0.7, fall_time=0.7, area=2.0)
+#
+# plt.plot(x, y)
+# plt.title("Smooth Pulse with Controlled Area, Duration, Rise/Fall")
+# plt.xlabel("Time")
+# plt.ylabel("Amplitude")
+# plt.grid(True)
+# plt.show()
 
 def smooth_rise_linear_fall(
     x,
