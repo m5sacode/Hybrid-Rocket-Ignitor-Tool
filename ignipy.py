@@ -806,6 +806,10 @@ class Grain():
         self.T = T_ambient
 
         # Simplest shit, just pyrolysis
+        if T_ambient < self.T_melt:
+            self.grain_state = 0
+        if T_ambient < self.T_gas:
+            self.grain_state = 1
         if T_ambient > self.T_melt:
             self.grain_state = 1
         if T_ambient > self.T_gas:
@@ -1181,7 +1185,7 @@ class Engine():
         # print("Mass expelled: ", m_expelled)
         if m_expelled > self.Chamber.fluid.get_mass():
             print(" CHAMBER EMPTIED ")
-            m_expelled = self.Chamber.fluid.get_mass()
+            m_expelled = self.Chamber.fluid.get_mass()-.000001
 
         chamber_unit_fluid = self.Chamber.fluid * 1 / self.Chamber.fluid.get_mass()
         fluid_expelled = m_expelled * chamber_unit_fluid
@@ -1227,7 +1231,7 @@ class Engine():
         self.Time = t_start
         self.Injector.set_timing(injector_start, shutdown)
         self.Ignitor.set_timing(ignition_start)
-        times, pressures, temps, mdots, machs, grain_states, grain_ts, grain_mass, grain_liquid_mass, mdots_ox = [], [], [], [], [], [], [], [], [], []
+        times, pressures, temps, mdots, machs, grain_states, grain_ts, grain_mass, grain_gas_mass, mdots_ox = [], [], [], [], [], [], [], [], [], []
         for step in range(int((t_end-t_start) / dt)):
             t = self.Time
             # Example: turn on subsystems at event times
@@ -1246,7 +1250,7 @@ class Engine():
             grain_states.append(self.Grain.grain_state)
             grain_ts.append(self.Grain.T)
             grain_mass.append(self.Grain.solid_mass)
-            grain_liquid_mass.append(self.Grain.liquid_mass)
+            grain_gas_mass.append(self.gas_f_mass)
             # Recompute nozzle quantities for logging
             R_univ = 8.314462618  # J/mol*K
             cp_molar = self.Chamber.fluid.get_cp(t=self.Chamber.T)  # [J/mol*K]
@@ -1293,8 +1297,8 @@ class Engine():
         axs[5].set_yticklabels(["Solid", "Melting", "Gassing", "Burning", "Burned"])
         axs[5].grid(True)
 
-        axs[6].plot(times, grain_mass, label="Total Grain Mass")
-        axs[6].plot(times, grain_liquid_mass, label="Liquid Grain Mass")
+        # axs[6].plot(times, grain_mass, label="Total Grain Mass")
+        axs[6].plot(times, grain_gas_mass, label="Liquid Grain Mass")
         axs[6].set_ylabel("Grain Mass [kg]")
         axs[6].grid(True)
         axs[6].legend()

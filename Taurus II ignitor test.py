@@ -6,13 +6,13 @@ import pulse_generators as pg
 # -------- IGNITOR STUFF ----------
 
 # time base
-t_vector = np.linspace(0, 5, 2000)
+t_vector = np.linspace(0, 10, 2000)
 dt = t_vector[1] - t_vector[0]
 
 # --- steel wool parameters ---
-steel_mass = 10/1000         # kg (20 g total steel consumed)
+steel_mass = 8/1000         # kg (20 g total steel consumed)
 h_per_kg_steel = 9.58e6    # J/kg  (approx heat release for Fe -> Fe2O3)
-burn_duration = 5 # s
+burn_duration = 6 # s
 
 
 m_dot_curve = pg.smooth_rise_linear_fall(t_vector, burn_duration, 0.2, steel_mass)
@@ -129,7 +129,7 @@ abs_grain.setup_burn(
 
 # -------- CHAMBER STUFF ----------
 
-volume = 0.0002116864 # m^3
+volume = 0.508*(0.04445/2)**2 # m^3
 initialP = 101325 # Pa, ambient
 initialT = 293.15 # K
 
@@ -148,7 +148,7 @@ chamber = ip.Chamber(volume, initialP, initial_fluid, initial_T=initialT)
 ChimeraMk2 = ip.Engine(ignitor, nozzle, injector, abs_grain, chamber)
 
 # -------- TIMINGS ----------
-ignition = -4.0 # s
+ignition = -5.0 # s
 mv_open = 0.0 # s
 shutdown = 4
 
