@@ -148,7 +148,7 @@ chamber = ip.Chamber(volume, initialP, initial_fluid, initial_T=initialT)
 ChimeraMk2 = ip.Engine(ignitor, nozzle, injector, abs_grain, chamber)
 
 # -------- TIMINGS ----------
-ignition = -4.0 # s
+ignition = -3.6 # s
 mv_open = 0.0 # s
 shutdown = 4
 
@@ -159,6 +159,6 @@ t_start = ignition-0.1
 t_end = shutdown+0.5
 # t_end = 0.0
 
-dt=1/10000
+dt=1/1000000
 
 ChimeraMk2.run_ignition_sequence(t_start, t_end, ignition, mv_open, shutdown, dt=dt)

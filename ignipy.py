@@ -1147,15 +1147,11 @@ class Engine():
             n_chamber = self.Chamber.fluid.get_n()
             # cp1 = self.Chamber.fluid.get_cp(self.Chamber.T) * n_chamber
             cp1 = self._scalar_cp_mass(self.Chamber.fluid, self.Chamber.T)
-            m1 = self.Chamber.mass
-            m2 = in_m_added
-            n_injector = in_fluid_added.get_n()
-            # cp2 = in_fluid_added.get_cp(in_T) * n_injector
-            cp2 = self._scalar_cp_mass(in_fluid_added, in_T)
+
             self.Chamber.fluid  = self.Chamber.fluid + in_fluid_added
             T1 = self.Chamber.T
             T2 = in_T
-            self.Chamber.T = (m1*cp1*T1 + m2*cp2*T2)/(m1*cp1+m2*cp2)
+
 
         if ig_fluid_released is not None:
             self.Chamber.fluid  = self.Chamber.fluid + ig_fluid_released
@@ -1166,6 +1162,16 @@ class Engine():
         n_chamber=self.Chamber.fluid.get_n()
         # cp = self.Chamber.fluid.get_cp(self.Chamber.T)*n_chamber
         cp = self._scalar_cp_mass(self.Chamber.fluid, self.Chamber.T)
+        cp1=cp
+        if in_fluid_added is not None:
+            m1 = self.Chamber.mass
+            m2 = in_m_added
+            n_injector = in_fluid_added.get_n()
+            # cp2 = in_fluid_added.get_cp(in_T) * n_injector
+            cp2 = self._scalar_cp_mass(in_fluid_added, in_T)
+            T1 = self.Chamber.T
+            T2 = in_T
+            self.Chamber.T = (m1 * cp1 * T1 + m2 * cp2 * T2) / (m1 * cp1 + m2 * cp2)
 
         # --- Compute nozzle mass flow  ---
         R_univ = 8.314462618  # J/mol*K
@@ -1190,7 +1196,30 @@ class Engine():
         chamber_unit_fluid = self.Chamber.fluid * 1 / self.Chamber.fluid.get_mass()
         fluid_expelled = m_expelled * chamber_unit_fluid
 
-        self.Chamber.T = self.Chamber.T + (ig_heat_released+added_burn_enthalpy)/cp
+        # --- Compute fraction of mass expelled from the chamber
+        mass_before = self.Chamber.fluid.get_mass()
+        if mass_before > 0:
+            expelled_fraction = m_expelled / mass_before
+        else:
+            expelled_fraction = 0.0
+        # --- Expel proportional fuel and oxidizer masses
+        fuel_expelled = expelled_fraction * self.gas_f_mass
+        ox_expelled = expelled_fraction * self.ox_mass
+
+        self.gas_f_mass -= fuel_expelled
+        self.ox_mass -= ox_expelled
+
+        # Safety clamps
+        self.gas_f_mass = max(self.gas_f_mass, 0.0)
+        self.ox_mass = max(self.ox_mass, 0.0)
+
+        # --- Energy balance: add burn heat, subtract exhaust enthalpy
+        Q_in = ig_heat_released + added_burn_enthalpy
+        Q_out = cp * self.Chamber.T * m_expelled
+
+        self.Chamber.T += (Q_in - Q_out) / cp
+
+        # self.Chamber.T = self.Chamber.T + (ig_heat_released+added_burn_enthalpy)/cp
 
         # --- Update chamber pressure ---
         R_bar = 8.314
@@ -1298,7 +1327,7 @@ class Engine():
         axs[5].grid(True)
 
         # axs[6].plot(times, grain_mass, label="Total Grain Mass")
-        axs[6].plot(times, grain_gas_mass, label="Liquid Grain Mass")
+        axs[6].plot(times, grain_gas_mass, label="Gas Grain Mass")
         axs[6].set_ylabel("Grain Mass [kg]")
         axs[6].grid(True)
         axs[6].legend()
